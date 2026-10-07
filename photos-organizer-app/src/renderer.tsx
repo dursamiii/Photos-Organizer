@@ -9,25 +9,57 @@ interface PhotoWithThumbnail extends Photo {
 function App() {
   // State to hold the list of photos with their thumbnails
   const [photos, setPhotos] = useState<PhotoWithThumbnail[]>([]);
+  const [isDevelopment, setIsDevelopment] = useState(false);
+  const [importProgress, setImportProgress] =
+    useState<ImportProgress | null>(null);
 
   // Function to load photos from the database and read their thumbnails
   const loadPhotos = async () => {
     const savedPhotos = await window.electronAPI.getPhotos();
 
     const photosWithThumbnails = await Promise.all(
-      savedPhotos.map(async (photo) => {
-        const thumbnail = await window.electronAPI.readPhoto(
-          photo.thumbnail_path ?? photo.storage_path,
-        );
+      savedPhotos.map(async (photo): Promise<PhotoWithThumbnail | null> => {
+        try {
+          const thumbnail = await window.electronAPI.readPhoto(
+            photo.thumbnail_path ?? photo.storage_path,
+          );
 
-        return {
-          ...photo,
-          thumbnail,
-        };
-      })
+          return { ...photo, thumbnail };
+        } catch (thumbnailError) {
+          if (photo.thumbnail_path) {
+            try {
+              const original = await window.electronAPI.readPhoto(
+                photo.storage_path,
+              );
+
+              console.warn(
+                `Thumbnail unavailable for "${photo.filename}", showing original instead.`,
+                thumbnailError,
+              );
+              return { ...photo, thumbnail: original };
+            } catch (originalError) {
+              console.error(
+                `Unable to load photo "${photo.filename}".`,
+                originalError,
+              );
+              return null;
+            }
+          }
+
+          console.error(
+            `Unable to load photo "${photo.filename}".`,
+            thumbnailError,
+          );
+          return null;
+        }
+      }),
     );
 
-    setPhotos(photosWithThumbnails);
+    setPhotos(
+      photosWithThumbnails.filter(
+        (photo): photo is PhotoWithThumbnail => photo !== null,
+      ),
+    );
   };
 
   // Handler for selecting and importing photos
@@ -38,9 +70,7 @@ function App() {
       return;
     }
 
-    await window.electronAPI.importPhotos(selectedPhotos);
-
-    await loadPhotos();
+    await runImport(selectedPhotos);
   };
 
   const handleSelectPhotoFolder = async () => {
@@ -50,9 +80,7 @@ function App() {
       return;
     }
 
-    await window.electronAPI.importPhotos(selectedPhotos);
-
-    await loadPhotos();
+    await runImport(selectedPhotos);
   };
 
   const handleDeletePhoto = async (photoId: number) => {
@@ -67,6 +95,27 @@ function App() {
     await window.electronAPI.deletePhoto(photoId);
 
     await loadPhotos();
+  };
+
+  const handleDeleteAllPhotos = async () => {
+    const confirmed = window.confirm(
+      "Hapus semua foto yang diimpor beserta thumbnail dari Photos Organizer? File sumber asli tidak dihapus.",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const deletedCount = await window.electronAPI.deleteAllPhotos();
+      await loadPhotos();
+      window.alert(`${deletedCount} foto berhasil dihapus.`);
+    } catch (error) {
+      console.error("Failed to delete all imported photos.", error);
+      window.alert(
+        `Gagal menghapus semua foto: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   };
 
   /*
@@ -97,8 +146,39 @@ function App() {
 
   // Load photos when the component mounts
   useEffect(() => {
+    const unsubscribe = window.electronAPI.onImportProgress((progress) => {
+      setImportProgress(progress);
+    });
+
+    window.electronAPI.isDevelopment().then(setIsDevelopment);
     loadPhotos();
+
+    return unsubscribe;
   }, []);
+
+  async function runImport(filePaths: string[]) {
+    if (filePaths.length === 0) {
+      return;
+    }
+
+    setImportProgress({
+      status: "running",
+      total: filePaths.length,
+      completed: 0,
+      workerCount: Math.min(4, filePaths.length),
+      activeFiles: [],
+      imported: 0,
+      duplicates: 0,
+      failed: 0,
+    });
+
+    try {
+      await window.electronAPI.importPhotos(filePaths);
+      await loadPhotos();
+    } finally {
+      setImportProgress(null);
+    }
+  };
 
   return (
     <main>
@@ -119,12 +199,45 @@ function App() {
         Test Thumbnail
       </button>
       */}
-      <button onClick={handleSelectPhotos}>
+      <button
+        disabled={importProgress?.status === "running"}
+        onClick={handleSelectPhotos}
+      >
         Tambah Foto
       </button>
-      <button onClick={handleSelectPhotoFolder}>
+      <button
+        disabled={importProgress?.status === "running"}
+        onClick={handleSelectPhotoFolder}
+      >
         Import dari Folder
       </button>
+      {isDevelopment && (
+        <button
+          disabled={importProgress?.status === "running"}
+          onClick={handleDeleteAllPhotos}
+        >
+          Hapus Semua (Dev)
+        </button>
+      )}
+
+      {importProgress?.status === "running" && (
+        <section className="import-progress" aria-live="polite" role="status">
+          <div className="import-progress-heading">
+            <span className="import-spinner" aria-hidden="true" />
+            <strong>Mengimpor foto</strong>
+          </div>
+          <p className="import-progress-summary">
+            {importProgress.completed} / {importProgress.total} foto
+            {" · "}
+            {importProgress.workerCount} worker
+          </p>
+          <progress
+            aria-label="Progres import foto"
+            value={importProgress.completed}
+            max={importProgress.total}
+          />
+        </section>
+      )}
 
       <p>{photos.length} foto</p>
 

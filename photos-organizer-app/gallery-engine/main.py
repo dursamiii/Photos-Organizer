@@ -1,11 +1,11 @@
 import json
 import sys
+import os
 from concurrent.futures import ThreadPoolExecutor
-
 from thumbnail import generate_thumbnail
 
 
-WORKER_COUNT = 4
+WORKER_COUNT = max(1, (os.cpu_count() or 1) - 1)
 
 executor = ThreadPoolExecutor(
     max_workers=WORKER_COUNT

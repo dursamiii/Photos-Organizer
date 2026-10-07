@@ -14,14 +14,30 @@ interface Photo {
   created_at: string;
 }
 
+interface ImportProgress {
+  status: "running" | "completed";
+  total: number;
+  completed: number;
+  workerCount: number;
+  activeFiles: string[];
+  imported: number;
+  duplicates: number;
+  failed: number;
+}
+
 interface Window {
   electronAPI: {
+    isDevelopment: () => Promise<boolean>;
     selectPhotos: () => Promise<string[]>;
     selectPhotoFolder: () => Promise<string[]>;
     readPhoto: (filePath: string) => Promise<string>;
     importPhotos: (filePaths: string[]) => Promise<string[]>;
+    onImportProgress: (
+      callback: (progress: ImportProgress) => void,
+    ) => () => void;
     getPhotos: () => Promise<Photo[]>;
     deletePhoto: (photoId: number) => Promise<boolean>;
+    deleteAllPhotos: () => Promise<number>;
     enginePing: () => Promise<{
     success: boolean;
     message?: string;
