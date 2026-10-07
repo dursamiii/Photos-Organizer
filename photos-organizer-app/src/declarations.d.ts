@@ -8,6 +8,7 @@ interface Photo {
   filename: string;
   original_path: string;
   storage_path: string;
+  thumbnail_path: string | null;
   file_size: number;
   mime_type: string | null;
   created_at: string;

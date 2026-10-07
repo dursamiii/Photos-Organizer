@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
-import { readFile, copyFile, mkdir, stat, unlink } from "node:fs/promises";
+import { readFile, copyFile, mkdir, rm, stat, unlink } from "node:fs/promises";
 import db from "./database";
 import { createHash, randomUUID } from "node:crypto";
 import { engine } from "./engine-manager";
@@ -130,8 +130,12 @@ ipcMain.handle("read-photo", async (_event, filePath: string) => {
 
 ipcMain.handle("import-photos", async (_event, filePaths: string[]) => {
   const photosDir = path.join(app.getPath("userData"), "photos");
+  const thumbnailsDir = path.join(app.getPath("userData"), "thumbnails");
 
-  await mkdir(photosDir, { recursive: true });
+  await Promise.all([
+    mkdir(photosDir, { recursive: true }),
+    mkdir(thumbnailsDir, { recursive: true }),
+  ]);
 
   const importedPhotos: string[] = [];
 
@@ -158,31 +162,59 @@ ipcMain.handle("import-photos", async (_event, filePaths: string[]) => {
     const extension = path.extname(fileName);
     const storageFileName = `${randomUUID()}${extension}`;
     const destination = path.join(photosDir, storageFileName);
+    const thumbnailPath = path.join(
+      thumbnailsDir,
+      `${path.parse(storageFileName).name}.jpg`,
+    );
 
     await copyFile(filePath, destination);
 
-    const fileInfo = await stat(destination);
+    try {
+      const thumbnailResult = await engine.send({
+        id: randomUUID(),
+        action: "generate_thumbnail",
+        input: destination,
+        output: thumbnailPath,
+        max_size: 500,
+      });
 
-    db.prepare(`
-      INSERT INTO photos (
-        filename,
-        original_path,
-        storage_path,
-        file_size,
-        file_hash,
-        mime_type,
-        created_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      fileName,
-      filePath,
-      destination,
-      fileInfo.size,
-      fileHash,
-      getMimeType(fileName),
-      new Date().toISOString()
-    );
+      if (!thumbnailResult.success) {
+        throw new Error(
+          `Thumbnail generation failed for ${fileName}: ${String(thumbnailResult.error ?? "unknown engine error")}`,
+        );
+      }
+
+      const fileInfo = await stat(destination);
+
+      db.prepare(`
+        INSERT INTO photos (
+          filename,
+          original_path,
+          storage_path,
+          thumbnail_path,
+          file_size,
+          file_hash,
+          mime_type,
+          created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        fileName,
+        filePath,
+        destination,
+        thumbnailPath,
+        fileInfo.size,
+        fileHash,
+        getMimeType(fileName),
+        new Date().toISOString()
+      );
+    } catch (error) {
+      await Promise.all([
+        rm(destination, { force: true }),
+        rm(thumbnailPath, { force: true }),
+      ]);
+      throw error;
+    }
 
     importedPhotos.push(destination);
   }
@@ -194,17 +226,22 @@ ipcMain.handle("import-photos", async (_event, filePaths: string[]) => {
 ipcMain.handle("delete-photo", async (_event, photoId: number) => {
   const photo = db
     .prepare(`
-      SELECT storage_path
+      SELECT storage_path, thumbnail_path
       FROM photos
       WHERE id = ?
     `)
-    .get(photoId) as { storage_path: string } | undefined;
+    .get(photoId) as
+    | { storage_path: string; thumbnail_path: string | null }
+    | undefined;
 
   if (!photo) {
     throw new Error("Photo not found");
   }
 
-  await unlink(photo.storage_path);
+  await Promise.all([
+    unlink(photo.storage_path),
+    photo.thumbnail_path ? unlink(photo.thumbnail_path) : Promise.resolve(),
+  ]);
 
   db.prepare(`
     DELETE FROM photos

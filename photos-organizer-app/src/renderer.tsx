@@ -17,7 +17,7 @@ function App() {
     const photosWithThumbnails = await Promise.all(
       savedPhotos.map(async (photo) => {
         const thumbnail = await window.electronAPI.readPhoto(
-          photo.storage_path
+          photo.thumbnail_path ?? photo.storage_path,
         );
 
         return {
