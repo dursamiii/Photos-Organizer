@@ -17,6 +17,7 @@ interface Photo {
 interface Window {
   electronAPI: {
     selectPhotos: () => Promise<string[]>;
+    selectPhotoFolder: () => Promise<string[]>;
     readPhoto: (filePath: string) => Promise<string>;
     importPhotos: (filePaths: string[]) => Promise<string[]>;
     getPhotos: () => Promise<Photo[]>;

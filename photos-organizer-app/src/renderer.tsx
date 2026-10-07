@@ -42,6 +42,19 @@ function App() {
 
     await loadPhotos();
   };
+
+  const handleSelectPhotoFolder = async () => {
+    const selectedPhotos = await window.electronAPI.selectPhotoFolder();
+
+    if (selectedPhotos.length === 0) {
+      return;
+    }
+
+    await window.electronAPI.importPhotos(selectedPhotos);
+
+    await loadPhotos();
+  };
+
   const handleDeletePhoto = async (photoId: number) => {
     const confirmed = window.confirm(
       "Hapus foto ini dari Photos Organizer?"
@@ -56,6 +69,7 @@ function App() {
     await loadPhotos();
   };
 
+  /*
   // Handler for testing the thumbnail generation
   const handleTestThumbnail = async () => {
     const selectedPhotos = await window.electronAPI.selectPhotos();
@@ -79,6 +93,7 @@ function App() {
 
     console.log("Thumbnail result:", result);
   };
+  */
 
   // Load photos when the component mounts
   useEffect(() => {
@@ -88,6 +103,7 @@ function App() {
   return (
     <main>
       <h1>Photos Organizer</h1>
+      {/* Tombol tes engine disimpan untuk debugging nanti.
       <button
         onClick={async () => {
           const result = await window.electronAPI.enginePing();
@@ -97,11 +113,17 @@ function App() {
       >
         Test Python Engine
       </button>
+      */}
+      {/* Tombol tes thumbnail disimpan untuk debugging nanti.
       <button onClick={handleTestThumbnail}>
         Test Thumbnail
       </button>
+      */}
       <button onClick={handleSelectPhotos}>
         Tambah Foto
+      </button>
+      <button onClick={handleSelectPhotoFolder}>
+        Import dari Folder
       </button>
 
       <p>{photos.length} foto</p>

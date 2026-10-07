@@ -1,7 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
-import { readFile, copyFile, mkdir, rm, stat, unlink } from "node:fs/promises";
+import {
+  readFile,
+  copyFile,
+  mkdir,
+  readdir,
+  rm,
+  stat,
+  unlink,
+} from "node:fs/promises";
 import db from "./database";
 import { createHash, randomUUID } from "node:crypto";
 import { engine } from "./engine-manager";
@@ -83,6 +91,39 @@ function getMimeType(fileName: string): string {
   return mimeTypes[extension] ?? "application/octet-stream";
 }
 
+const supportedImageExtensions = new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".heic",
+]);
+
+async function collectImagesFromFolder(folderPath: string): Promise<string[]> {
+  const pendingFolders = [folderPath];
+  const imagePaths: string[] = [];
+
+  while (pendingFolders.length > 0) {
+    const currentFolder = pendingFolders.pop()!;
+    const entries = await readdir(currentFolder, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const entryPath = path.join(currentFolder, entry.name);
+
+      if (entry.isDirectory()) {
+        pendingFolders.push(entryPath);
+      } else if (
+        entry.isFile() &&
+        supportedImageExtensions.has(path.extname(entry.name).toLowerCase())
+      ) {
+        imagePaths.push(entryPath);
+      }
+    }
+  }
+
+  return imagePaths;
+}
+
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
@@ -119,6 +160,18 @@ ipcMain.handle("select-photos", async () => {
   return result.filePaths;
 });
 
+ipcMain.handle("select-photo-folder", async () => {
+  const result = await dialog.showOpenDialog({
+    properties: ["openDirectory"],
+  });
+
+  if (result.canceled) {
+    return [];
+  }
+
+  return collectImagesFromFolder(result.filePaths[0]);
+});
+
 // BACA FOTO DARI FILE SYSTEM
 ipcMain.handle("read-photo", async (_event, filePath: string) => {
   const file = await readFile(filePath);
@@ -128,98 +181,116 @@ ipcMain.handle("read-photo", async (_event, filePath: string) => {
   return `data:${mimeType};base64,${file.toString("base64")}`;
 });
 
+
+// IMPORT FOTO KE DATABASE DAN FILE SYSTEM
 ipcMain.handle("import-photos", async (_event, filePaths: string[]) => {
+  const importStartedAt = performance.now();
   const photosDir = path.join(app.getPath("userData"), "photos");
   const thumbnailsDir = path.join(app.getPath("userData"), "thumbnails");
-
-  await Promise.all([
-    mkdir(photosDir, { recursive: true }),
-    mkdir(thumbnailsDir, { recursive: true }),
-  ]);
-
   const importedPhotos: string[] = [];
+  let duplicatesSkipped = 0;
 
-  for (const filePath of filePaths) {
-    const fileName = path.basename(filePath);
+  try {
+    await Promise.all([
+      mkdir(photosDir, { recursive: true }),
+      mkdir(thumbnailsDir, { recursive: true }),
+    ]);
 
-    // Hitung hash isi file
-    const fileHash = await getFileHash(filePath);
+    for (const filePath of filePaths) {
+      const fileName = path.basename(filePath);
+      const fileHash = await getFileHash(filePath);
+      const existingPhoto = db
+        .prepare(`
+          SELECT storage_path
+          FROM photos
+          WHERE file_hash = ?
+        `)
+        .get(fileHash) as { storage_path: string } | undefined;
 
-    // Cek apakah foto sudah pernah diimport
-    const existingPhoto = db
-      .prepare(`
-        SELECT storage_path
-        FROM photos
-        WHERE file_hash = ?
-      `)
-      .get(fileHash) as { storage_path: string } | undefined;
-
-    if (existingPhoto) {
-      console.log(`Duplicate skipped: ${fileName}`);
-      continue;
-    }
-
-    const extension = path.extname(fileName);
-    const storageFileName = `${randomUUID()}${extension}`;
-    const destination = path.join(photosDir, storageFileName);
-    const thumbnailPath = path.join(
-      thumbnailsDir,
-      `${path.parse(storageFileName).name}.jpg`,
-    );
-
-    await copyFile(filePath, destination);
-
-    try {
-      const thumbnailResult = await engine.send({
-        id: randomUUID(),
-        action: "generate_thumbnail",
-        input: destination,
-        output: thumbnailPath,
-        max_size: 500,
-      });
-
-      if (!thumbnailResult.success) {
-        throw new Error(
-          `Thumbnail generation failed for ${fileName}: ${String(thumbnailResult.error ?? "unknown engine error")}`,
-        );
+      if (existingPhoto) {
+        console.info(`[Import] Duplicate skipped: ${fileName}`);
+        duplicatesSkipped += 1;
+        continue;
       }
 
-      const fileInfo = await stat(destination);
-
-      db.prepare(`
-        INSERT INTO photos (
-          filename,
-          original_path,
-          storage_path,
-          thumbnail_path,
-          file_size,
-          file_hash,
-          mime_type,
-          created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        fileName,
-        filePath,
-        destination,
-        thumbnailPath,
-        fileInfo.size,
-        fileHash,
-        getMimeType(fileName),
-        new Date().toISOString()
+      const extension = path.extname(fileName);
+      const storageFileName = `${randomUUID()}${extension}`;
+      const destination = path.join(photosDir, storageFileName);
+      const thumbnailPath = path.join(
+        thumbnailsDir,
+        `${path.parse(storageFileName).name}.jpg`,
       );
-    } catch (error) {
-      await Promise.all([
-        rm(destination, { force: true }),
-        rm(thumbnailPath, { force: true }),
-      ]);
-      throw error;
+
+      await copyFile(filePath, destination);
+
+      try {
+        const thumbnailStartedAt = performance.now();
+        let thumbnailSucceeded = false;
+        console.info(`[Thumbnail] Started: ${fileName}`);
+
+        try {
+          const thumbnailResult = await engine.send({
+            id: randomUUID(),
+            action: "generate_thumbnail",
+            input: destination,
+            output: thumbnailPath,
+            max_size: 500,
+          });
+
+          if (!thumbnailResult.success) {
+            throw new Error(
+              `Thumbnail generation failed for ${fileName}: ${String(thumbnailResult.error ?? "unknown engine error")}`,
+            );
+          }
+
+          thumbnailSucceeded = true;
+        } finally {
+          console.info(
+            `[Thumbnail] ${thumbnailSucceeded ? "Finished" : "Failed"}: ${fileName} in ${Math.round(performance.now() - thumbnailStartedAt)} ms`,
+          );
+        }
+
+        const fileInfo = await stat(destination);
+
+        db.prepare(`
+          INSERT INTO photos (
+            filename,
+            original_path,
+            storage_path,
+            thumbnail_path,
+            file_size,
+            file_hash,
+            mime_type,
+            created_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          fileName,
+          filePath,
+          destination,
+          thumbnailPath,
+          fileInfo.size,
+          fileHash,
+          getMimeType(fileName),
+          new Date().toISOString()
+        );
+      } catch (error) {
+        await Promise.all([
+          rm(destination, { force: true }),
+          rm(thumbnailPath, { force: true }),
+        ]);
+        throw error;
+      }
+
+      importedPhotos.push(destination);
     }
 
-    importedPhotos.push(destination);
+    return importedPhotos;
+  } finally {
+    console.info(
+      `[Import] Finished: ${importedPhotos.length} imported, ${duplicatesSkipped} duplicate(s) skipped, ${Math.round(performance.now() - importStartedAt)} ms total`,
+    );
   }
-
-  return importedPhotos;
 });
 
 // DELETE FOTO DARI DATABASE DAN FILE SYSTEM

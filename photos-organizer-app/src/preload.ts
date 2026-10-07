@@ -3,6 +3,8 @@ import { contextBridge, ipcRenderer } from "electron";
 contextBridge.exposeInMainWorld("electronAPI", {
   selectPhotos: () => ipcRenderer.invoke("select-photos"),
 
+  selectPhotoFolder: () => ipcRenderer.invoke("select-photo-folder"),
+
   readPhoto: (filePath: string) =>
     ipcRenderer.invoke("read-photo", filePath),
 
