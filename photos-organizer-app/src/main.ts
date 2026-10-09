@@ -1,9 +1,9 @@
 import { app, BrowserWindow, dialog } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
-import { engine } from './engine-manager';
-import { registerAlbumHandlers } from './album';
-import { registerPhotoHandlers } from './photos';
+import { engine } from './services/engine-manager';
+import { registerAlbumHandlers } from './services/album';
+import { registerPhotoHandlers } from './services/photos';
 
 const handleOutputStreamError = (error: Error & { code?: string }) => {
   if (error.code !== 'EPIPE') {

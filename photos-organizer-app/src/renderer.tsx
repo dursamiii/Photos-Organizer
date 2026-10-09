@@ -6,7 +6,7 @@ import {
   useState,
 } from 'react';
 import { createRoot } from 'react-dom/client';
-import './index.css';
+import './style/index.css';
 
 interface PhotoWithThumbnail extends Photo {
   thumbnail: string;
@@ -28,6 +28,8 @@ const groupOptions = Array.from(
   { length: 20 },
   (_, index) => `Group ${index + 1}`,
 );
+const deleteHoldDurationMs = 4000;
+const deleteConfirmFadeDurationMs = 180;
 
 function App() {
   const [albums, setAlbums] = useState<PhotoAlbum[]>([]);
@@ -38,6 +40,14 @@ function App() {
   const [selectedAlbumId, setSelectedAlbumId] = useState<number | null>(null);
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<number>>(
     () => new Set(),
+  );
+  const [isDeleteAllConfirmOpen, setIsDeleteAllConfirmOpen] = useState(false);
+  const [isDeleteAllConfirmClosing, setIsDeleteAllConfirmClosing] =
+    useState(false);
+  const [isHoldingDelete, setIsHoldingDelete] = useState(false);
+  const deleteHoldTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const deleteConfirmFadeTimeout = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
   );
   const selectionAnchorId = useRef<number | null>(null);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
@@ -443,7 +453,7 @@ function App() {
     }
   };
 
-  const deleteSelectedPhotos = async () => {
+  const deleteSelectedPhotos = async (confirmedAll = false) => {
     const selectedPhotos = photos.filter((photo) =>
       selectedPhotoIds.has(photo.id),
     );
@@ -451,7 +461,26 @@ function App() {
       clearPhotoSelection();
       return;
     }
+
+    const isDeletingAllPhotos =
+      selectedPhotos.length === photos.length &&
+      selectedPhotoIds.size === photos.length &&
+      photos.every((photo) => selectedPhotoIds.has(photo.id));
+
+    if (isDeletingAllPhotos && !confirmedAll) {
+      if (deleteConfirmFadeTimeout.current !== null) {
+        clearTimeout(deleteConfirmFadeTimeout.current);
+        deleteConfirmFadeTimeout.current = null;
+      }
+      setIsDeleteAllConfirmClosing(false);
+      setIsDeleteAllConfirmOpen(true);
+      return;
+    }
+    if (confirmedAll && !isDeletingAllPhotos) {
+      return;
+    }
     if (
+      !isDeletingAllPhotos &&
       !window.confirm(
         `Hapus ${selectedPhotos.length} foto terpilih dari Kilas? Foto asli tidak akan dihapus.`,
       )
@@ -498,28 +527,89 @@ function App() {
     }
   };
 
-  useEffect(() => {
-    if (selectedPhotoIds.size === 0) {
+  const cancelDeleteHold = () => {
+    if (deleteHoldTimeout.current !== null) {
+      clearTimeout(deleteHoldTimeout.current);
+      deleteHoldTimeout.current = null;
+    }
+    setIsHoldingDelete(false);
+  };
+
+  const closeDeleteAllConfirm = () => {
+    cancelDeleteHold();
+    if (
+      isDeleteAllConfirmClosing ||
+      deleteConfirmFadeTimeout.current !== null
+    ) {
+      return;
+    }
+    setIsDeleteAllConfirmClosing(true);
+    deleteConfirmFadeTimeout.current = setTimeout(() => {
+      deleteConfirmFadeTimeout.current = null;
+      setIsDeleteAllConfirmOpen(false);
+      setIsDeleteAllConfirmClosing(false);
+    }, deleteConfirmFadeDurationMs);
+  };
+
+  const startDeleteHold = () => {
+    if (deleteHoldTimeout.current !== null) {
       return;
     }
 
+    setIsHoldingDelete(true);
+    deleteHoldTimeout.current = setTimeout(() => {
+      deleteHoldTimeout.current = null;
+      setIsHoldingDelete(false);
+      closeDeleteAllConfirm();
+      void deleteSelectedPhotos(true);
+    }, deleteHoldDurationMs);
+  };
+
+  useEffect(() => {
     const handleSelectionShortcut = (event: KeyboardEvent) => {
+      const target = event.target;
+      const isEditingText =
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.closest('input, textarea, select, [contenteditable="true"]'));
+
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLowerCase() === 'a' &&
+        !isEditingText &&
+        !contextMenu &&
+        !renamingAlbum &&
+        !isCreateModalOpen &&
+        !isDeleteAllConfirmOpen
+      ) {
+        if (photos.length === 0) {
+          return;
+        }
+        event.preventDefault();
+        selectionAnchorId.current = photos[0].id;
+        setSelectedPhotoIds(new Set(photos.map((photo) => photo.id)));
+        return;
+      }
+
       if (event.key === 'Escape') {
+        if (isDeleteAllConfirmOpen) {
+          event.preventDefault();
+          closeDeleteAllConfirm();
+          return;
+        }
         if (!contextMenu) {
           clearPhotoSelection();
         }
         return;
       }
 
-      if (event.key !== 'Delete' && event.key !== 'Backspace') {
+      if (
+        (event.key !== 'Delete' && event.key !== 'Backspace') ||
+        selectedPhotoIds.size === 0
+      ) {
         return;
       }
-      const target = event.target;
-      if (
-        target instanceof HTMLElement &&
-        (target.isContentEditable ||
-          target.closest('input, textarea, select, [contenteditable="true"]'))
-      ) {
+      if (isEditingText) {
         return;
       }
 
@@ -530,7 +620,26 @@ function App() {
     document.addEventListener('keydown', handleSelectionShortcut);
     return () =>
       document.removeEventListener('keydown', handleSelectionShortcut);
-  }, [selectedPhotoIds, photos, contextMenu]);
+  }, [
+    selectedPhotoIds,
+    photos,
+    contextMenu,
+    renamingAlbum,
+    isCreateModalOpen,
+    isDeleteAllConfirmOpen,
+  ]);
+
+  useEffect(
+    () => () => {
+      if (deleteHoldTimeout.current !== null) {
+        clearTimeout(deleteHoldTimeout.current);
+      }
+      if (deleteConfirmFadeTimeout.current !== null) {
+        clearTimeout(deleteConfirmFadeTimeout.current);
+      }
+    },
+    [],
+  );
 
   const toggleYear = (year: string) => {
     setCollapsedYears((current) => {
@@ -635,7 +744,7 @@ function App() {
               return (
                 <section className="tree-year" key={year}>
                   <button
-                    className="tree-parent"
+                    className="tree-parent tree-year-button"
                     type="button"
                     aria-expanded={isYearExpanded}
                     onClick={() => toggleYear(year)}
@@ -662,7 +771,7 @@ function App() {
                       return (
                         <div className="tree-batch" key={batchKey}>
                           <button
-                            className="tree-parent"
+                            className="tree-parent tree-batch-button"
                             type="button"
                             aria-expanded={isBatchExpanded}
                             onClick={() => toggleBatch(batchKey)}
@@ -683,6 +792,7 @@ function App() {
                               <button
                                 className={`tree-group${selectedAlbumId === album.id ? ' is-selected' : ''}`}
                                 type="button"
+                                aria-pressed={selectedAlbumId === album.id}
                                 key={album.id}
                                 onClick={() => setSelectedAlbumId(album.id)}
                                 onContextMenu={(event) =>
@@ -1220,6 +1330,76 @@ function App() {
                 </button>
               </div>
             </form>
+          </section>
+        </div>
+      )}
+
+      {isDeleteAllConfirmOpen && (
+        <div
+          className={`modal-backdrop delete-all-confirm-backdrop${isDeleteAllConfirmClosing ? ' is-closing' : ''}`}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeDeleteAllConfirm();
+            }
+          }}
+        >
+          <section
+            className={`album-modal delete-all-modal${isDeleteAllConfirmClosing ? ' is-closing' : ''}`}
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-all-title"
+            aria-describedby="delete-all-description"
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">HAPUS SELURUH ALBUM</p>
+                <h2 id="delete-all-title">Yakin ingin menghapus semua foto?</h2>
+              </div>
+            </div>
+            <p id="delete-all-description" className="modal-description">
+              {photos.length} foto akan dihapus dari Kilas. File foto asli di
+              lokasi asal tidak akan dihapus. Tahan tombol sampai garis
+              konfirmasi penuh untuk melanjutkan.
+            </p>
+            <div className="modal-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={closeDeleteAllConfirm}
+              >
+                Batal
+              </button>
+              <button
+                className={`hold-delete-button${isHoldingDelete ? ' is-holding' : ''}`}
+                type="button"
+                aria-label="Tahan untuk menghapus semua foto"
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  startDeleteHold();
+                }}
+                onPointerUp={cancelDeleteHold}
+                onPointerCancel={cancelDeleteHold}
+                onPointerLeave={cancelDeleteHold}
+                onKeyDown={(event) => {
+                  if (
+                    (event.key === ' ' || event.key === 'Enter') &&
+                    !event.repeat
+                  ) {
+                    event.preventDefault();
+                    startDeleteHold();
+                  }
+                }}
+                onKeyUp={(event) => {
+                  if (event.key === ' ' || event.key === 'Enter') {
+                    cancelDeleteHold();
+                  }
+                }}
+                onBlur={cancelDeleteHold}
+                onClick={(event) => event.preventDefault()}
+              >
+                <span>Tahan untuk menghapus</span>
+              </button>
+            </div>
           </section>
         </div>
       )}
