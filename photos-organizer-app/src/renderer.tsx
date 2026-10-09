@@ -1,42 +1,124 @@
-import { useEffect, useState } from "react";
-import { createRoot } from "react-dom/client";
-import "./index.css";
+import {
+  FormEvent,
+  MouseEvent as ReactMouseEvent,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
+import { createRoot } from 'react-dom/client';
+import './index.css';
 
 interface PhotoWithThumbnail extends Photo {
   thumbnail: string;
 }
 
+type ContextMenuState =
+  | { kind: 'album'; album: PhotoAlbum; x: number; y: number }
+  | { kind: 'photo'; photo: PhotoWithThumbnail; x: number; y: number };
+
+const currentYear = new Date().getFullYear();
+const yearOptions = Array.from({ length: 12 }, (_, index) =>
+  String(currentYear - index),
+);
+const batchOptions = Array.from(
+  { length: 12 },
+  (_, index) => `Batch ${index + 1}`,
+);
+const groupOptions = Array.from(
+  { length: 20 },
+  (_, index) => `Group ${index + 1}`,
+);
+
 function App() {
-  // State to hold the list of photos with their thumbnails
+  const [albums, setAlbums] = useState<PhotoAlbum[]>([]);
   const [photos, setPhotos] = useState<PhotoWithThumbnail[]>([]);
-  const [isDevelopment, setIsDevelopment] = useState(false);
-  const [importProgress, setImportProgress] =
-    useState<ImportProgress | null>(null);
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(
+    null,
+  );
+  const [selectedAlbumId, setSelectedAlbumId] = useState<number | null>(null);
+  const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<number>>(
+    () => new Set(),
+  );
+  const selectionAnchorId = useRef<number | null>(null);
+  const [isShiftPressed, setIsShiftPressed] = useState(false);
+  const [hoveredPhotoId, setHoveredPhotoId] = useState<number | null>(null);
+  const [collapsedYears, setCollapsedYears] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [collapsedBatches, setCollapsedBatches] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [selectedCity, setSelectedCity] = useState('Semua kota');
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [renamingAlbum, setRenamingAlbum] = useState<PhotoAlbum | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameError, setRenameError] = useState('');
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [formValues, setFormValues] = useState({
+    year: String(currentYear),
+    batch: batchOptions[0],
+    group: groupOptions[0],
+    startDate: '',
+    endDate: '',
+  });
 
-  // Function to load photos from the database and read their thumbnails
-  const loadPhotos = async () => {
-    const savedPhotos = await window.electronAPI.getPhotos();
+  const selectedAlbum = albums.find((album) => album.id === selectedAlbumId);
+  const shiftPreviewPhotoIds = new Set<number>();
+  if (isShiftPressed && hoveredPhotoId !== null) {
+    const anchorIndex = photos.findIndex(
+      (photo) => photo.id === selectionAnchorId.current,
+    );
+    const hoveredIndex = photos.findIndex(
+      (photo) => photo.id === hoveredPhotoId,
+    );
+    if (hoveredIndex !== -1 && anchorIndex === -1) {
+      const hoveredPhoto = photos[hoveredIndex];
+      if (!selectedPhotoIds.has(hoveredPhoto.id)) {
+        shiftPreviewPhotoIds.add(hoveredPhoto.id);
+      }
+    } else if (anchorIndex !== -1 && hoveredIndex !== -1) {
+      for (
+        let index = Math.min(anchorIndex, hoveredIndex);
+        index <= Math.max(anchorIndex, hoveredIndex);
+        index += 1
+      ) {
+        const photo = photos[index];
+        if (!selectedPhotoIds.has(photo.id)) {
+          shiftPreviewPhotoIds.add(photo.id);
+        }
+      }
+    }
+  }
+  const years = [...new Set(albums.map((album) => album.year))].sort(
+    (left, right) => Number(left) - Number(right),
+  );
 
-    const photosWithThumbnails = await Promise.all(
+  const openCreateModal = () => {
+    setFormError('');
+    setIsCreateModalOpen(true);
+  };
+
+  const loadPhotos = async (albumId: number) => {
+    const savedPhotos = await window.electronAPI.getPhotos(albumId);
+    const withThumbnails = await Promise.all(
       savedPhotos.map(async (photo): Promise<PhotoWithThumbnail | null> => {
         try {
-          const thumbnail = await window.electronAPI.readPhoto(
-            photo.thumbnail_path ?? photo.storage_path,
-          );
-
-          return { ...photo, thumbnail };
+          return {
+            ...photo,
+            thumbnail: await window.electronAPI.readPhoto(
+              photo.thumbnail_path ?? photo.storage_path,
+            ),
+          };
         } catch (thumbnailError) {
           if (photo.thumbnail_path) {
             try {
-              const original = await window.electronAPI.readPhoto(
-                photo.storage_path,
-              );
-
-              console.warn(
-                `Thumbnail unavailable for "${photo.filename}", showing original instead.`,
-                thumbnailError,
-              );
-              return { ...photo, thumbnail: original };
+              return {
+                ...photo,
+                thumbnail: await window.electronAPI.readPhoto(
+                  photo.storage_path,
+                ),
+              };
             } catch (originalError) {
               console.error(
                 `Unable to load photo "${photo.filename}".`,
@@ -54,212 +136,1097 @@ function App() {
         }
       }),
     );
-
     setPhotos(
-      photosWithThumbnails.filter(
+      withThumbnails.filter(
         (photo): photo is PhotoWithThumbnail => photo !== null,
       ),
     );
   };
 
-  // Handler for selecting and importing photos
-  const handleSelectPhotos = async () => {
-    const selectedPhotos = await window.electronAPI.selectPhotos();
-
-    if (selectedPhotos.length === 0) {
-      return;
-    }
-
-    await runImport(selectedPhotos);
-  };
-
-  const handleSelectPhotoFolder = async () => {
-    const selectedPhotos = await window.electronAPI.selectPhotoFolder();
-
-    if (selectedPhotos.length === 0) {
-      return;
-    }
-
-    await runImport(selectedPhotos);
-  };
-
-  const handleDeletePhoto = async (photoId: number) => {
-    const confirmed = window.confirm(
-      "Hapus foto ini dari Photos Organizer?"
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    await window.electronAPI.deletePhoto(photoId);
-
-    await loadPhotos();
-  };
-
-  const handleDeleteAllPhotos = async () => {
-    const confirmed = window.confirm(
-      "Hapus semua foto yang diimpor beserta thumbnail dari Photos Organizer? File sumber asli tidak dihapus.",
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    try {
-      const deletedCount = await window.electronAPI.deleteAllPhotos();
-      await loadPhotos();
-      window.alert(`${deletedCount} foto berhasil dihapus.`);
-    } catch (error) {
-      console.error("Failed to delete all imported photos.", error);
-      window.alert(
-        `Gagal menghapus semua foto: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  };
-
-  /*
-  // Handler for testing the thumbnail generation
-  const handleTestThumbnail = async () => {
-    const selectedPhotos = await window.electronAPI.selectPhotos();
-
-    if (selectedPhotos.length === 0) {
-      return;
-    }
-
-    const inputPath = selectedPhotos[0];
-
-    const outputPath =
-      inputPath.replace(/\.[^/.]+$/, "") +
-      "-thumbnail.jpg";
-
-    const result =
-      await window.electronAPI.generateThumbnail(
-        inputPath,
-        outputPath,
-        500
-      );
-
-    console.log("Thumbnail result:", result);
-  };
-  */
-
-  // Load photos when the component mounts
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onImportProgress((progress) => {
-      setImportProgress(progress);
-    });
+    const unsubscribe = window.electronAPI.onImportProgress(setImportProgress);
 
-    window.electronAPI.isDevelopment().then(setIsDevelopment);
-    loadPhotos();
+    window.electronAPI
+      .getAlbums()
+      .then((savedAlbums) => {
+        setAlbums(savedAlbums);
+        if (savedAlbums.length > 0) {
+          setSelectedAlbumId(savedAlbums[0].id);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error('Failed to load albums.', error);
+      });
 
     return unsubscribe;
   }, []);
 
-  async function runImport(filePaths: string[]) {
+  useEffect(() => {
+    if (selectedAlbumId === null) {
+      setPhotos([]);
+      setSelectedPhotoIds(new Set());
+      selectionAnchorId.current = null;
+      return;
+    }
+
+    setSelectedPhotoIds(new Set());
+    selectionAnchorId.current = null;
+    loadPhotos(selectedAlbumId).catch((error: unknown) => {
+      console.error('Failed to load photos for the selected album.', error);
+      setPhotos([]);
+    });
+  }, [selectedAlbumId]);
+
+  const togglePhotoSelection = (photoId: number, updateAnchor = true) => {
+    if (updateAnchor) {
+      selectionAnchorId.current = photoId;
+    }
+    setSelectedPhotoIds((current) => {
+      const next = new Set(current);
+      if (next.has(photoId)) {
+        next.delete(photoId);
+      } else {
+        next.add(photoId);
+      }
+      return next;
+    });
+  };
+
+  const selectPhoto = (photoId: number) => {
+    selectionAnchorId.current = photoId;
+    setSelectedPhotoIds((current) => new Set(current).add(photoId));
+  };
+
+  const selectPhotoRange = (photoId: number) => {
+    const anchorIndex = photos.findIndex(
+      (photo) => photo.id === selectionAnchorId.current,
+    );
+    const targetIndex = photos.findIndex((photo) => photo.id === photoId);
+    if (anchorIndex === -1 || targetIndex === -1) {
+      selectPhoto(photoId);
+      return;
+    }
+
+    const start = Math.min(anchorIndex, targetIndex);
+    const end = Math.max(anchorIndex, targetIndex);
+    setSelectedPhotoIds((current) => {
+      const next = new Set(current);
+      for (const photo of photos.slice(start, end + 1)) {
+        next.add(photo.id);
+      }
+      return next;
+    });
+  };
+
+  const handlePhotoClick = (
+    event: ReactMouseEvent<HTMLElement>,
+    photoId: number,
+  ) => {
+    if (event.shiftKey) {
+      selectPhotoRange(photoId);
+    } else if (event.metaKey || event.ctrlKey || selectedPhotoIds.size > 0) {
+      togglePhotoSelection(photoId);
+    }
+  };
+
+  const clearPhotoSelection = () => {
+    selectionAnchorId.current = null;
+    setSelectedPhotoIds(new Set());
+  };
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    const dismissMenu = () => {
+      setContextMenu(null);
+    };
+    const dismissOnOutsideClick = (event: globalThis.MouseEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest('[data-context-menu]')
+      ) {
+        return;
+      }
+      setContextMenu(null);
+    };
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setContextMenu(null);
+      }
+    };
+
+    document.addEventListener('mousedown', dismissOnOutsideClick);
+    document.addEventListener('keydown', dismissOnEscape);
+    window.addEventListener('blur', dismissMenu);
+    window.addEventListener('resize', dismissMenu);
+    return () => {
+      document.removeEventListener('mousedown', dismissOnOutsideClick);
+      document.removeEventListener('keydown', dismissOnEscape);
+      window.removeEventListener('blur', dismissMenu);
+      window.removeEventListener('resize', dismissMenu);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    const updateShiftState = (event: KeyboardEvent) => {
+      setIsShiftPressed(event.shiftKey);
+    };
+    const clearShiftState = () => setIsShiftPressed(false);
+
+    window.addEventListener('keydown', updateShiftState);
+    window.addEventListener('keyup', updateShiftState);
+    window.addEventListener('blur', clearShiftState);
+    return () => {
+      window.removeEventListener('keydown', updateShiftState);
+      window.removeEventListener('keyup', updateShiftState);
+      window.removeEventListener('blur', clearShiftState);
+    };
+  }, []);
+
+  function openContextMenu(
+    event: ReactMouseEvent<HTMLElement>,
+    target: 'album',
+    item: PhotoAlbum,
+  ): void;
+  function openContextMenu(
+    event: ReactMouseEvent<HTMLElement>,
+    target: 'photo',
+    item: PhotoWithThumbnail,
+  ): void;
+  function openContextMenu(
+    event: ReactMouseEvent<HTMLElement>,
+    target: ContextMenuState['kind'],
+    item: PhotoAlbum | PhotoWithThumbnail,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const menuWidth = 200;
+    const menuHeight = target === 'album' ? 104 : 90;
+    const position = {
+      x: Math.max(
+        8,
+        Math.min(event.clientX, window.innerWidth - menuWidth - 8),
+      ),
+      y: Math.max(
+        8,
+        Math.min(event.clientY, window.innerHeight - menuHeight - 8),
+      ),
+    };
+
+    if (target === 'album' && !('thumbnail' in item)) {
+      setContextMenu({ kind: 'album', album: item, ...position });
+    } else if (target === 'photo' && 'thumbnail' in item) {
+      setContextMenu({ kind: 'photo', photo: item, ...position });
+    }
+  }
+
+  const createAlbum = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (formValues.endDate < formValues.startDate) {
+      setFormError('Tanggal akhir harus sama atau setelah tanggal awal.');
+      return;
+    }
+
+    try {
+      const album = await window.electronAPI.createAlbum({
+        year: formValues.year,
+        batch: formValues.batch,
+        groupName: formValues.group,
+        startDate: formValues.startDate,
+        endDate: formValues.endDate,
+      });
+      setAlbums((current) => [...current, album]);
+      setSelectedAlbumId(album.id);
+      setCollapsedYears((current) => {
+        const next = new Set(current);
+        next.delete(album.year);
+        return next;
+      });
+      setCollapsedBatches((current) => {
+        const next = new Set(current);
+        next.delete(`${album.year}:${album.batch}`);
+        return next;
+      });
+      setIsCreateModalOpen(false);
+      setFormError('');
+    } catch (error) {
+      setFormError(
+        error instanceof Error
+          ? error.message
+          : 'Album gagal dibuat. Coba lagi.',
+      );
+    }
+  };
+
+  const renameAlbum = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!renamingAlbum) {
+      return;
+    }
+
+    try {
+      const updatedAlbum = await window.electronAPI.renameAlbum(
+        renamingAlbum.id,
+        renameValue,
+      );
+      setAlbums((current) =>
+        current.map((album) =>
+          album.id === updatedAlbum.id ? updatedAlbum : album,
+        ),
+      );
+      setRenamingAlbum(null);
+      setRenameError('');
+    } catch (error) {
+      setRenameError(
+        error instanceof Error ? error.message : 'Nama album gagal diubah.',
+      );
+    }
+  };
+
+  const deleteAlbum = async (album: PhotoAlbum) => {
+    if (album.photo_count > 0) {
+      return;
+    }
+    if (!window.confirm(`Hapus album "${album.group_name}"?`)) {
+      return;
+    }
+
+    try {
+      await window.electronAPI.deleteAlbum(album.id);
+      setAlbums((current) => current.filter((item) => item.id !== album.id));
+      setSelectedAlbumId((current) => {
+        if (current !== album.id) {
+          return current;
+        }
+        return albums.find((item) => item.id !== album.id)?.id ?? null;
+      });
+    } catch (error) {
+      window.alert(
+        error instanceof Error ? error.message : 'Album gagal dihapus.',
+      );
+    }
+  };
+
+  const deletePhoto = async (photo: PhotoWithThumbnail) => {
+    if (
+      !window.confirm(
+        `Hapus "${photo.filename}" dari Kilas? Foto asli tidak akan dihapus.`,
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await window.electronAPI.deletePhoto(photo.id);
+      setPhotos((current) => current.filter((item) => item.id !== photo.id));
+      setSelectedPhotoIds((current) => {
+        const next = new Set(current);
+        next.delete(photo.id);
+        return next;
+      });
+      setAlbums((current) =>
+        current.map((album) =>
+          album.id === photo.album_id
+            ? {
+                ...album,
+                photo_count: Math.max(0, album.photo_count - 1),
+              }
+            : album,
+        ),
+      );
+    } catch (error) {
+      window.alert(
+        error instanceof Error ? error.message : 'Foto gagal dihapus.',
+      );
+    }
+  };
+
+  const deleteSelectedPhotos = async () => {
+    const selectedPhotos = photos.filter((photo) =>
+      selectedPhotoIds.has(photo.id),
+    );
+    if (selectedPhotos.length === 0) {
+      clearPhotoSelection();
+      return;
+    }
+    if (
+      !window.confirm(
+        `Hapus ${selectedPhotos.length} foto terpilih dari Kilas? Foto asli tidak akan dihapus.`,
+      )
+    ) {
+      return;
+    }
+
+    const results = await Promise.allSettled(
+      selectedPhotos.map((photo) => window.electronAPI.deletePhoto(photo.id)),
+    );
+    const deletedPhotos = selectedPhotos.filter(
+      (_, index) => results[index].status === 'fulfilled',
+    );
+    const failedCount = selectedPhotos.length - deletedPhotos.length;
+
+    setPhotos((current) =>
+      current.filter(
+        (photo) => !deletedPhotos.some((deleted) => deleted.id === photo.id),
+      ),
+    );
+    setAlbums((current) =>
+      current.map((album) => ({
+        ...album,
+        photo_count: Math.max(
+          0,
+          album.photo_count -
+            deletedPhotos.filter((photo) => photo.album_id === album.id).length,
+        ),
+      })),
+    );
+    setSelectedPhotoIds(
+      new Set(
+        selectedPhotos
+          .filter((_, index) => results[index].status === 'rejected')
+          .map((photo) => photo.id),
+      ),
+    );
+    selectionAnchorId.current = null;
+
+    if (failedCount > 0) {
+      window.alert(
+        `${deletedPhotos.length} foto berhasil dihapus, ${failedCount} foto gagal dihapus.`,
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (selectedPhotoIds.size === 0) {
+      return;
+    }
+
+    const handleSelectionShortcut = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (!contextMenu) {
+          clearPhotoSelection();
+        }
+        return;
+      }
+
+      if (event.key !== 'Delete' && event.key !== 'Backspace') {
+        return;
+      }
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.closest('input, textarea, select, [contenteditable="true"]'))
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      void deleteSelectedPhotos();
+    };
+
+    document.addEventListener('keydown', handleSelectionShortcut);
+    return () =>
+      document.removeEventListener('keydown', handleSelectionShortcut);
+  }, [selectedPhotoIds, photos, contextMenu]);
+
+  const toggleYear = (year: string) => {
+    setCollapsedYears((current) => {
+      const next = new Set(current);
+      if (next.has(year)) {
+        next.delete(year);
+      } else {
+        next.add(year);
+      }
+      return next;
+    });
+  };
+
+  const toggleBatch = (batchKey: string) => {
+    setCollapsedBatches((current) => {
+      const next = new Set(current);
+      if (next.has(batchKey)) {
+        next.delete(batchKey);
+      } else {
+        next.add(batchKey);
+      }
+      return next;
+    });
+  };
+
+  const updateForm = (field: keyof typeof formValues, value: string) => {
+    setFormValues((current) => ({ ...current, [field]: value }));
+  };
+
+  const uploadToSelectedAlbum = async () => {
+    if (!selectedAlbum) {
+      return;
+    }
+
+    const filePaths = await window.electronAPI.selectPhotos();
     if (filePaths.length === 0) {
       return;
     }
 
-    setImportProgress({
-      status: "running",
-      total: filePaths.length,
-      completed: 0,
-      workerCount: Math.min(4, filePaths.length),
-      activeFiles: [],
-      imported: 0,
-      duplicates: 0,
-      failed: 0,
-    });
-
     try {
-      await window.electronAPI.importPhotos(filePaths);
-      await loadPhotos();
-    } finally {
-      setImportProgress(null);
+      await window.electronAPI.importPhotos(filePaths, selectedAlbum.id);
+      await loadPhotos(selectedAlbum.id);
+      setAlbums(await window.electronAPI.getAlbums());
+    } catch (error) {
+      console.error('Failed to upload photos to the selected album.', error);
+      window.alert(
+        error instanceof Error ? error.message : 'Upload foto gagal.',
+      );
     }
   };
 
   return (
-    <main>
-      <h1>Photos Organizer</h1>
-      {/* Tombol tes engine disimpan untuk debugging nanti.
-      <button
-        onClick={async () => {
-          const result = await window.electronAPI.enginePing();
+    <div
+      className={
+        window.electronAPI.isMacOS ? 'app-shell app-shell--macos' : 'app-shell'
+      }
+    >
+      <aside className="sidebar">
+        <div className="brand">Kilas</div>
 
-          console.log("Engine response:", result);
-        }}
-      >
-        Test Python Engine
-      </button>
-      */}
-      {/* Tombol tes thumbnail disimpan untuk debugging nanti.
-      <button onClick={handleTestThumbnail}>
-        Test Thumbnail
-      </button>
-      */}
-      <button
-        disabled={importProgress?.status === "running"}
-        onClick={handleSelectPhotos}
-      >
-        Tambah Foto
-      </button>
-      <button
-        disabled={importProgress?.status === "running"}
-        onClick={handleSelectPhotoFolder}
-      >
-        Import dari Folder
-      </button>
-      {isDevelopment && (
-        <button
-          disabled={importProgress?.status === "running"}
-          onClick={handleDeleteAllPhotos}
-        >
-          Hapus Semua (Dev)
-        </button>
-      )}
+        <div className="sidebar-section-heading">
+          <span>Album</span>
+          <button
+            className="icon-button add-album-button"
+            type="button"
+            aria-label="Buat album"
+            title="Buat album"
+            onClick={openCreateModal}
+          >
+            +
+          </button>
+        </div>
 
-      {importProgress?.status === "running" && (
-        <section className="import-progress" aria-live="polite" role="status">
-          <div className="import-progress-heading">
-            <span className="import-spinner" aria-hidden="true" />
-            <strong>Mengimpor foto</strong>
-          </div>
-          <p className="import-progress-summary">
-            {importProgress.completed} / {importProgress.total} foto
-            {" · "}
-            {importProgress.workerCount} worker
-          </p>
-          <progress
-            aria-label="Progres import foto"
-            value={importProgress.completed}
-            max={importProgress.total}
-          />
-        </section>
-      )}
-
-      <p>{photos.length} foto</p>
-
-      <div className="gallery">
-        {photos.map((photo) => (
-          <div className="photo-card" key={photo.id}>
-            <img
-              src={photo.thumbnail}
-              alt={photo.filename}
-            />
-
-            <p>{photo.filename}</p>
-            <button onClick={() => handleDeletePhoto(photo.id)}>
-              Hapus
+        {albums.length === 0 ? (
+          <div className="sidebar-empty">
+            <span className="sidebar-empty-icon" aria-hidden="true">
+              ▱
+            </span>
+            <p>Belum ada album</p>
+            <button
+              className="text-button"
+              type="button"
+              onClick={openCreateModal}
+            >
+              Buat album pertama
             </button>
           </div>
-        ))}
-      </div>
-    </main>
+        ) : (
+          <nav className="album-tree" aria-label="Album foto">
+            {years.map((year) => {
+              const batches = [
+                ...new Set(
+                  albums
+                    .filter((album) => album.year === year)
+                    .map((album) => album.batch),
+                ),
+              ].sort((left, right) =>
+                left.localeCompare(right, undefined, { numeric: true }),
+              );
+              const isYearExpanded = !collapsedYears.has(year);
+
+              return (
+                <section className="tree-year" key={year}>
+                  <button
+                    className="tree-parent"
+                    type="button"
+                    aria-expanded={isYearExpanded}
+                    onClick={() => toggleYear(year)}
+                  >
+                    <span
+                      className={`tree-chevron${isYearExpanded ? ' is-expanded' : ''}`}
+                      aria-hidden="true"
+                    >
+                      ⌄
+                    </span>
+                    <span className="tree-icon" aria-hidden="true">
+                      ▱
+                    </span>
+                    <span>{year}</span>
+                  </button>
+                  {isYearExpanded &&
+                    batches.map((batch) => {
+                      const batchKey = `${year}:${batch}`;
+                      const isBatchExpanded = !collapsedBatches.has(batchKey);
+                      const batchAlbums = albums.filter(
+                        (album) => album.year === year && album.batch === batch,
+                      );
+
+                      return (
+                        <div className="tree-batch" key={batchKey}>
+                          <button
+                            className="tree-parent"
+                            type="button"
+                            aria-expanded={isBatchExpanded}
+                            onClick={() => toggleBatch(batchKey)}
+                          >
+                            <span
+                              className={`tree-chevron${isBatchExpanded ? ' is-expanded' : ''}`}
+                              aria-hidden="true"
+                            >
+                              ⌄
+                            </span>
+                            <span className="tree-icon" aria-hidden="true">
+                              ▱
+                            </span>
+                            <span>{batch}</span>
+                          </button>
+                          {isBatchExpanded &&
+                            batchAlbums.map((album) => (
+                              <button
+                                className={`tree-group${selectedAlbumId === album.id ? ' is-selected' : ''}`}
+                                type="button"
+                                key={album.id}
+                                onClick={() => setSelectedAlbumId(album.id)}
+                                onContextMenu={(event) =>
+                                  openContextMenu(event, 'album', album)
+                                }
+                              >
+                                <span aria-hidden="true">♧</span>
+                                <span>{album.group_name}</span>
+                              </button>
+                            ))}
+                        </div>
+                      );
+                    })}
+                </section>
+              );
+            })}
+            <button
+              className="tree-add-button"
+              type="button"
+              onClick={openCreateModal}
+            >
+              <span aria-hidden="true">+</span>
+              Tambah album
+            </button>
+          </nav>
+        )}
+
+        <div className="sidebar-footer">
+          <div className="footer-emblem" aria-hidden="true">
+            ✳
+          </div>
+          <span>
+            Kenangan baik,
+            <br />
+            tertata rapi.
+          </span>
+        </div>
+      </aside>
+
+      <main className="workspace">
+        <div className="sticky-header">
+          <header className="topbar">
+            <label className="search-box">
+              <span aria-hidden="true">⌕</span>
+              <input
+                type="search"
+                aria-label="Cari foto atau album"
+                placeholder="Cari berdasarkan tahun, batch, grup..."
+              />
+              <kbd>⌘ K</kbd>
+            </label>
+            <div className="topbar-actions">
+              <span className="save-status">
+                <span aria-hidden="true">✓</span> Semua perubahan tersimpan
+              </span>
+              <button
+                className="primary-button upload-button"
+                type="button"
+                onClick={uploadToSelectedAlbum}
+                disabled={
+                  !selectedAlbum || importProgress?.status === 'running'
+                }
+                title={
+                  selectedAlbum
+                    ? 'Upload ke album terpilih'
+                    : 'Buat dan pilih album untuk mengaktifkan upload'
+                }
+              >
+                <span aria-hidden="true">＋</span>
+                Upload
+              </button>
+              <button
+                className="icon-button help-button"
+                type="button"
+                aria-label="Bantuan"
+              >
+                ?
+              </button>
+              <button
+                className="avatar-button"
+                type="button"
+                aria-label="Profil"
+              >
+                K
+              </button>
+            </div>
+          </header>
+          <div
+            className={`toolbar-stage${selectedPhotoIds.size > 0 ? ' has-selection' : ''}`}
+          >
+            <div className="toolbar">
+              <div className="filter-tabs" aria-label="Filter foto">
+                <button className="is-active" type="button">
+                  Semua foto
+                </button>
+                <button type="button">Foto</button>
+                <button type="button">Video</button>
+                <button type="button">♡ Favorit</button>
+              </div>
+              <div className="city-filters" aria-label="Filter kota">
+                {['Semua kota', 'Mekkah', 'Madinah', 'Jeddah', 'Taif'].map(
+                  (city) => (
+                    <button
+                      className={`city-filter${selectedCity === city ? ' is-active' : ''}`}
+                      type="button"
+                      key={city}
+                      onClick={() => setSelectedCity(city)}
+                    >
+                      {city}
+                    </button>
+                  ),
+                )}
+              </div>
+            </div>
+            <div
+              className="selection-toolbar"
+              aria-live="polite"
+              aria-label="Foto terpilih"
+            >
+              <button
+                className="icon-button selection-close"
+                type="button"
+                aria-label="Batalkan pilihan"
+                title="Batalkan pilihan"
+                onClick={clearPhotoSelection}
+              >
+                ×
+              </button>
+              <strong>Foto dipilih: {selectedPhotoIds.size}</strong>
+              <button
+                className="selection-delete-button"
+                type="button"
+                onClick={() => void deleteSelectedPhotos()}
+                aria-label="Hapus foto terpilih"
+                title="Hapus foto terpilih (Delete / Backspace)"
+                aria-keyshortcuts="Delete Backspace"
+              >
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  height="24"
+                  fill="none"
+                >
+                  <path
+                    d="M4 7h16M9 4h6m-9.5 3 .8 12a1.5 1.5 0 0 0 1.5 1.4h8.4a1.5 1.5 0 0 0 1.5-1.4l.8-12M10 10v7m4-7v7"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="1.8"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="content-area">
+          {importProgress?.status === 'running' && (
+            <section
+              className="import-progress"
+              role="status"
+              aria-live="polite"
+            >
+              <div className="import-progress-heading">
+                <span className="import-spinner" aria-hidden="true" />
+                <strong>Mengunggah foto</strong>
+              </div>
+              <p className="import-progress-summary">
+                {importProgress.completed} / {importProgress.total} foto ·{' '}
+                {importProgress.workerCount} worker
+              </p>
+              <progress
+                value={importProgress.completed}
+                max={importProgress.total}
+              />
+            </section>
+          )}
+
+          {photos.length > 0 ? (
+            <section
+              className={`photo-grid${selectedPhotoIds.size > 0 ? ' has-selection' : ''}`}
+              aria-label="Foto album"
+            >
+              {photos.map((photo) => {
+                const isSelected = selectedPhotoIds.has(photo.id);
+                const isRangePreview = shiftPreviewPhotoIds.has(photo.id);
+                return (
+                  <div
+                    className={`photo-tile${isSelected ? ' is-selected' : ''}${isRangePreview ? ' is-range-preview' : ''}`}
+                    key={photo.id}
+                    onMouseEnter={() => setHoveredPhotoId(photo.id)}
+                    onMouseLeave={() => setHoveredPhotoId(null)}
+                    onClick={(event) => handlePhotoClick(event, photo.id)}
+                    onContextMenu={(event) =>
+                      openContextMenu(event, 'photo', photo)
+                    }
+                  >
+                    <img
+                      className="photo-grid-image"
+                      src={photo.thumbnail}
+                      alt=""
+                      draggable={false}
+                    />
+                    <button
+                      className="photo-selection-indicator"
+                      type="button"
+                      aria-label={`${isSelected ? 'Batalkan pilihan' : 'Pilih'} ${photo.filename}`}
+                      aria-pressed={isSelected}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (
+                          event.shiftKey ||
+                          event.metaKey ||
+                          event.ctrlKey ||
+                          selectedPhotoIds.size > 0
+                        ) {
+                          handlePhotoClick(event, photo.id);
+                        } else {
+                          selectPhoto(photo.id);
+                        }
+                      }}
+                    >
+                      ✓
+                    </button>
+                  </div>
+                );
+              })}
+            </section>
+          ) : (
+            <section className="gallery-empty">
+              <div className="empty-art" aria-hidden="true">
+                <div className="empty-sun" />
+                <div className="empty-mountain empty-mountain-back" />
+                <div className="empty-mountain empty-mountain-front" />
+                <div className="empty-photo">
+                  <span>✦</span>
+                </div>
+              </div>
+              {selectedAlbum ? (
+                <>
+                  <h2>{selectedAlbum.group_name} siap diisi</h2>
+                  <p>
+                    Rentang tanggal {selectedAlbum.start_date} —{' '}
+                    {selectedAlbum.end_date}
+                  </p>
+                  <p className="empty-hint">
+                    Foto yang diunggah akan masuk ke album ini.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h2>
+                    {albums.length === 0
+                      ? 'Mulai dengan membuat album'
+                      : 'Pilih album'}
+                  </h2>
+                  <p>
+                    {albums.length === 0
+                      ? 'Buat struktur tahun, batch, dan grup untuk menata foto perjalanan.'
+                      : 'Pilih album dari panel navigasi untuk melihat dan mengelola fotonya.'}
+                  </p>
+                  {albums.length === 0 && (
+                    <button
+                      className="primary-button create-first-button"
+                      type="button"
+                      onClick={openCreateModal}
+                    >
+                      <span aria-hidden="true">＋</span>
+                      Buat album
+                    </button>
+                  )}
+                </>
+              )}
+            </section>
+          )}
+        </div>
+      </main>
+
+      {contextMenu && (
+        <div
+          className="context-menu"
+          data-context-menu
+          role="menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          {contextMenu.kind === 'album' ? (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setRenamingAlbum(contextMenu.album);
+                  setRenameValue(contextMenu.album.group_name);
+                  setRenameError('');
+                  setContextMenu(null);
+                }}
+              >
+                Ganti nama album
+              </button>
+              <button
+                className="context-menu-danger"
+                type="button"
+                role="menuitem"
+                disabled={contextMenu.album.photo_count > 0}
+                title={
+                  contextMenu.album.photo_count > 0
+                    ? 'Kosongkan album terlebih dahulu'
+                    : undefined
+                }
+                onClick={() => {
+                  setContextMenu(null);
+                  void deleteAlbum(contextMenu.album);
+                }}
+              >
+                Hapus album
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  if (selectedPhotoIds.has(contextMenu.photo.id)) {
+                    togglePhotoSelection(contextMenu.photo.id);
+                  } else {
+                    selectPhoto(contextMenu.photo.id);
+                  }
+                  setContextMenu(null);
+                }}
+              >
+                {selectedPhotoIds.has(contextMenu.photo.id)
+                  ? 'Batalkan pilihan'
+                  : 'Pilih'}
+              </button>
+              <button
+                className="context-menu-danger"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setContextMenu(null);
+                  void deletePhoto(contextMenu.photo);
+                }}
+              >
+                Hapus foto
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {renamingAlbum && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setRenamingAlbum(null);
+              setRenameError('');
+            }
+          }}
+        >
+          <section
+            className="album-modal rename-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="rename-album-title"
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">ALBUM</p>
+                <h2 id="rename-album-title">Ganti nama album</h2>
+              </div>
+              <button
+                className="icon-button modal-close"
+                type="button"
+                aria-label="Tutup"
+                onClick={() => {
+                  setRenamingAlbum(null);
+                  setRenameError('');
+                }}
+              >
+                ×
+              </button>
+            </div>
+            <form onSubmit={renameAlbum}>
+              <label>
+                Nama grup
+                <input
+                  autoFocus
+                  required
+                  maxLength={80}
+                  value={renameValue}
+                  onChange={(event) => setRenameValue(event.target.value)}
+                />
+              </label>
+              {renameError && <p className="form-error">{renameError}</p>}
+              <div className="modal-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => {
+                    setRenamingAlbum(null);
+                    setRenameError('');
+                  }}
+                >
+                  Batal
+                </button>
+                <button className="primary-button" type="submit">
+                  Simpan
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {isCreateModalOpen && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setIsCreateModalOpen(false);
+            }
+          }}
+        >
+          <section
+            className="album-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-album-title"
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">STRUKTUR BARU</p>
+                <h2 id="create-album-title">Buat album</h2>
+              </div>
+              <button
+                className="icon-button modal-close"
+                type="button"
+                aria-label="Tutup"
+                onClick={() => setIsCreateModalOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <p className="modal-description">
+              Tentukan periode dan grup untuk mengatur foto-fotomu.
+            </p>
+
+            <form onSubmit={createAlbum}>
+              <div className="form-row">
+                <label>
+                  Tahun
+                  <select
+                    value={formValues.year}
+                    onChange={(event) => updateForm('year', event.target.value)}
+                  >
+                    {yearOptions.map((year) => (
+                      <option key={year} value={year}>
+                        {year}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Batch
+                  <select
+                    value={formValues.batch}
+                    onChange={(event) =>
+                      updateForm('batch', event.target.value)
+                    }
+                  >
+                    {batchOptions.map((batch) => (
+                      <option key={batch} value={batch}>
+                        {batch}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label>
+                Grup
+                <select
+                  value={formValues.group}
+                  onChange={(event) => updateForm('group', event.target.value)}
+                >
+                  {groupOptions.map((group) => (
+                    <option key={group} value={group}>
+                      {group}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <fieldset>
+                <legend>Rentang tanggal</legend>
+                <div className="form-row">
+                  <label>
+                    Dari
+                    <input
+                      type="date"
+                      required
+                      value={formValues.startDate}
+                      onChange={(event) =>
+                        updateForm('startDate', event.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    Sampai
+                    <input
+                      type="date"
+                      required
+                      min={formValues.startDate || undefined}
+                      value={formValues.endDate}
+                      onChange={(event) =>
+                        updateForm('endDate', event.target.value)
+                      }
+                    />
+                  </label>
+                </div>
+              </fieldset>
+              {formError && <p className="form-error">{formError}</p>}
+              <div className="modal-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => setIsCreateModalOpen(false)}
+                >
+                  Batal
+                </button>
+                <button className="primary-button" type="submit">
+                  Buat album
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+    </div>
   );
 }
 
-const root = createRoot(document.getElementById("root")!);
+const root = createRoot(document.getElementById('root')!);
 
 root.render(<App />);

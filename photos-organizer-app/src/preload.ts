@@ -1,17 +1,16 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer } from 'electron';
 
-contextBridge.exposeInMainWorld("electronAPI", {
-  isDevelopment: () => ipcRenderer.invoke("is-development"),
+contextBridge.exposeInMainWorld('electronAPI', {
+  isMacOS: process.platform === 'darwin',
 
-  selectPhotos: () => ipcRenderer.invoke("select-photos"),
+  selectPhotos: () => ipcRenderer.invoke('select-photos'),
 
-  selectPhotoFolder: () => ipcRenderer.invoke("select-photo-folder"),
+  selectPhotoFolder: () => ipcRenderer.invoke('select-photo-folder'),
 
-  readPhoto: (filePath: string) =>
-    ipcRenderer.invoke("read-photo", filePath),
+  readPhoto: (filePath: string) => ipcRenderer.invoke('read-photo', filePath),
 
-  importPhotos: (filePaths: string[]) =>
-    ipcRenderer.invoke("import-photos", filePaths),
+  importPhotos: (filePaths: string[], albumId: number) =>
+    ipcRenderer.invoke('import-photos', filePaths, albumId),
 
   onImportProgress: (callback: (progress: ImportProgress) => void) => {
     const listener = (
@@ -19,29 +18,31 @@ contextBridge.exposeInMainWorld("electronAPI", {
       progress: ImportProgress,
     ) => callback(progress);
 
-    ipcRenderer.on("import-progress", listener);
-    return () => ipcRenderer.removeListener("import-progress", listener);
+    ipcRenderer.on('import-progress', listener);
+    return () => ipcRenderer.removeListener('import-progress', listener);
   },
 
-  getPhotos: () => ipcRenderer.invoke("get-photos"),
+  getPhotos: (albumId?: number) => ipcRenderer.invoke('get-photos', albumId),
 
-  deletePhoto: (photoId: number) =>
-  ipcRenderer.invoke("delete-photo", photoId),
+  getAlbums: () => ipcRenderer.invoke('get-albums'),
 
-  deleteAllPhotos: () => ipcRenderer.invoke("delete-all-photos"),
+  createAlbum: (album: NewPhotoAlbum) =>
+    ipcRenderer.invoke('create-album', album),
 
-  enginePing: () =>
-  ipcRenderer.invoke("engine-ping"),
+  renameAlbum: (albumId: number, groupName: string) =>
+    ipcRenderer.invoke('rename-album', albumId, groupName),
+
+  deleteAlbum: (albumId: number) => ipcRenderer.invoke('delete-album', albumId),
+
+  deletePhoto: (photoId: number) => ipcRenderer.invoke('delete-photo', photoId),
+
+  deleteAllPhotos: () => ipcRenderer.invoke('delete-all-photos'),
+
+  enginePing: () => ipcRenderer.invoke('engine-ping'),
 
   generateThumbnail: (
     inputPath: string,
     outputPath: string,
-    maxSize?: number
-    ) =>
-    ipcRenderer.invoke(
-        "generate-thumbnail",
-        inputPath,
-        outputPath,
-        maxSize
-    ),
+    maxSize?: number,
+  ) => ipcRenderer.invoke('generate-thumbnail', inputPath, outputPath, maxSize),
 });
