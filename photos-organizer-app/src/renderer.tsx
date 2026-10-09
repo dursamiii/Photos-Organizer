@@ -45,10 +45,17 @@ function App() {
   const [isDeleteAllConfirmClosing, setIsDeleteAllConfirmClosing] =
     useState(false);
   const [isHoldingDelete, setIsHoldingDelete] = useState(false);
-  const deleteHoldTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const deleteConfirmFadeTimeout = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
+  const deleteHoldActive = useRef(false);
+  const deleteHoldStartedAt = useRef(0);
+  const deleteHoldProgress = useRef(0);
+  const deleteHoldFrame = useRef<number | null>(null);
+  const holdDeleteButton = useRef<HTMLButtonElement | null>(null);
+  const holdDeleteSvg = useRef<SVGSVGElement | null>(null);
+  const holdDeletePath = useRef<SVGPathElement | null>(null);
+  const holdDeleteReverseStartedAt = useRef(0);
+  const deleteConfirmCloseTimeout = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
   const selectionAnchorId = useRef<number | null>(null);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
   const [hoveredPhotoId, setHoveredPhotoId] = useState<number | null>(null);
@@ -468,9 +475,9 @@ function App() {
       photos.every((photo) => selectedPhotoIds.has(photo.id));
 
     if (isDeletingAllPhotos && !confirmedAll) {
-      if (deleteConfirmFadeTimeout.current !== null) {
-        clearTimeout(deleteConfirmFadeTimeout.current);
-        deleteConfirmFadeTimeout.current = null;
+      if (deleteConfirmCloseTimeout.current !== null) {
+        clearTimeout(deleteConfirmCloseTimeout.current);
+        deleteConfirmCloseTimeout.current = null;
       }
       setIsDeleteAllConfirmClosing(false);
       setIsDeleteAllConfirmOpen(true);
@@ -528,41 +535,132 @@ function App() {
   };
 
   const cancelDeleteHold = () => {
-    if (deleteHoldTimeout.current !== null) {
-      clearTimeout(deleteHoldTimeout.current);
-      deleteHoldTimeout.current = null;
+    if (!deleteHoldActive.current) {
+      return;
     }
+    deleteHoldActive.current = false;
     setIsHoldingDelete(false);
+    if (deleteHoldFrame.current !== null) {
+      cancelAnimationFrame(deleteHoldFrame.current);
+    }
+
+    const progressAtRelease = deleteHoldProgress.current;
+    const returnStartedAt = performance.now();
+    holdDeleteReverseStartedAt.current = returnStartedAt;
+    const returnProgress = (now: number) => {
+      const elapsed = now - holdDeleteReverseStartedAt.current;
+      const duration = 260;
+      const amount = Math.min(elapsed / duration, 1);
+      const easedAmount = 1 - (1 - amount) ** 3;
+      deleteHoldProgress.current = progressAtRelease * (1 - easedAmount);
+      if (holdDeletePath.current) {
+        holdDeletePath.current.style.strokeDashoffset = String(
+          1 - deleteHoldProgress.current,
+        );
+      }
+
+      if (amount < 1) {
+        deleteHoldFrame.current = requestAnimationFrame(returnProgress);
+      } else {
+        deleteHoldProgress.current = 0;
+        deleteHoldFrame.current = null;
+        if (holdDeletePath.current) {
+          holdDeletePath.current.style.strokeDashoffset = '1';
+        }
+      }
+    };
+
+    deleteHoldFrame.current = requestAnimationFrame(returnProgress);
   };
 
   const closeDeleteAllConfirm = () => {
     cancelDeleteHold();
     if (
       isDeleteAllConfirmClosing ||
-      deleteConfirmFadeTimeout.current !== null
+      deleteConfirmCloseTimeout.current !== null
     ) {
       return;
     }
     setIsDeleteAllConfirmClosing(true);
-    deleteConfirmFadeTimeout.current = setTimeout(() => {
-      deleteConfirmFadeTimeout.current = null;
+    deleteConfirmCloseTimeout.current = setTimeout(() => {
+      deleteConfirmCloseTimeout.current = null;
       setIsDeleteAllConfirmOpen(false);
       setIsDeleteAllConfirmClosing(false);
     }, deleteConfirmFadeDurationMs);
   };
 
   const startDeleteHold = () => {
-    if (deleteHoldTimeout.current !== null) {
+    if (deleteHoldActive.current) {
       return;
     }
 
+    if (deleteHoldFrame.current !== null) {
+      cancelAnimationFrame(deleteHoldFrame.current);
+      deleteHoldFrame.current = null;
+    }
+
+    const buttonBounds = holdDeleteButton.current?.getBoundingClientRect();
+    const svg = holdDeleteSvg.current;
+    const path = holdDeletePath.current;
+    if (!buttonBounds || !svg || !path) {
+      return;
+    }
+
+    const width = buttonBounds.width;
+    const height = buttonBounds.height;
+    const radius = Math.min(9, (height - 2) / 2, (width - 2) / 2);
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    path.setAttribute(
+      'd',
+      [
+        `M ${width / 2} 1`,
+        `H ${width - radius - 1}`,
+        `Q ${width - 1} 1 ${width - 1} ${radius + 1}`,
+        `V ${height - radius - 1}`,
+        `Q ${width - 1} ${height - 1} ${width - radius - 1} ${height - 1}`,
+        `H ${radius + 1}`,
+        `Q 1 ${height - 1} 1 ${height - radius - 1}`,
+        `V ${radius + 1}`,
+        `Q 1 1 ${radius + 1} 1`,
+        `H ${width / 2}`,
+      ].join(' '),
+    );
+    path.style.strokeDashoffset = '1';
+    deleteHoldProgress.current = 0;
+    deleteHoldStartedAt.current = performance.now();
+    deleteHoldActive.current = true;
     setIsHoldingDelete(true);
-    deleteHoldTimeout.current = setTimeout(() => {
-      deleteHoldTimeout.current = null;
+
+    const updateHoldProgress = (now: number) => {
+      const elapsed = now - deleteHoldStartedAt.current;
+      const amount = Math.min(elapsed / deleteHoldDurationMs, 1);
+      const finalSegmentProgress = (amount - 0.9) / 0.1;
+      const easedAmount =
+        amount <= 0.9
+          ? amount
+          : 0.9 +
+            0.1 *
+              (finalSegmentProgress +
+                finalSegmentProgress ** 2 -
+                finalSegmentProgress ** 3);
+      deleteHoldProgress.current = easedAmount;
+      if (holdDeletePath.current) {
+        holdDeletePath.current.style.strokeDashoffset = String(1 - easedAmount);
+      }
+
+      if (amount < 1) {
+        deleteHoldFrame.current = requestAnimationFrame(updateHoldProgress);
+        return;
+      }
+
+      deleteHoldFrame.current = null;
+      deleteHoldActive.current = false;
       setIsHoldingDelete(false);
       closeDeleteAllConfirm();
       void deleteSelectedPhotos(true);
-    }, deleteHoldDurationMs);
+    };
+
+    deleteHoldFrame.current = requestAnimationFrame(updateHoldProgress);
   };
 
   useEffect(() => {
@@ -631,11 +729,11 @@ function App() {
 
   useEffect(
     () => () => {
-      if (deleteHoldTimeout.current !== null) {
-        clearTimeout(deleteHoldTimeout.current);
+      if (deleteHoldFrame.current !== null) {
+        cancelAnimationFrame(deleteHoldFrame.current);
       }
-      if (deleteConfirmFadeTimeout.current !== null) {
-        clearTimeout(deleteConfirmFadeTimeout.current);
+      if (deleteConfirmCloseTimeout.current !== null) {
+        clearTimeout(deleteConfirmCloseTimeout.current);
       }
     },
     [],
@@ -1372,6 +1470,7 @@ function App() {
               <button
                 className={`hold-delete-button${isHoldingDelete ? ' is-holding' : ''}`}
                 type="button"
+                ref={holdDeleteButton}
                 aria-label="Tahan untuk menghapus semua foto"
                 onPointerDown={(event) => {
                   event.preventDefault();
@@ -1397,6 +1496,24 @@ function App() {
                 onBlur={cancelDeleteHold}
                 onClick={(event) => event.preventDefault()}
               >
+                <svg
+                  ref={holdDeleteSvg}
+                  className="hold-delete-progress"
+                  aria-hidden="true"
+                  viewBox="0 0 100 40"
+                  preserveAspectRatio="none"
+                >
+                  <path
+                    ref={holdDeletePath}
+                    pathLength="1"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeDasharray="1"
+                    strokeDashoffset="1"
+                    strokeLinejoin="round"
+                  />
+                </svg>
                 <span>Tahan untuk menghapus</span>
               </button>
             </div>

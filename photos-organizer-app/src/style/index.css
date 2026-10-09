@@ -373,6 +373,11 @@ button:focus-visible {
   box-shadow: 0 8px 24px rgb(52 77 116 / 5%);
   backdrop-filter: blur(22px) saturate(155%);
   -webkit-backdrop-filter: blur(22px) saturate(155%);
+  -webkit-app-region: drag;
+}
+
+.sticky-header :is(button, input, select, a, .search-box) {
+  -webkit-app-region: no-drag;
 }
 
 .topbar {
@@ -385,11 +390,6 @@ button:focus-visible {
   gap: 18px;
   padding: 14px 26px;
   border-bottom: 0;
-  -webkit-app-region: drag;
-}
-
-.topbar :is(.search-box, .topbar-actions) {
-  -webkit-app-region: no-drag;
 }
 
 .search-box {
@@ -506,7 +506,7 @@ kbd {
 }
 
 .content-area {
-  padding: 0 clamp(18px, 3vw, 38px) 40px;
+  padding: 0 clamp(16px, 2vw, 24px) 40px;
 }
 
 .breadcrumbs {
@@ -971,7 +971,10 @@ h1 {
 
 .hold-delete-button {
   position: relative;
+  display: inline-flex;
   min-height: 40px;
+  align-items: center;
+  justify-content: center;
   padding: 0 14px;
   border: 1px solid rgb(195 67 75 / 55%);
   border-radius: var(--radius-control);
@@ -985,53 +988,18 @@ h1 {
   white-space: nowrap;
 }
 
-.hold-delete-button::before {
+.hold-delete-progress {
   position: absolute;
-  z-index: 0;
-  box-sizing: border-box;
-  padding: 2px;
-  border-radius: inherit;
-  content: '';
+  z-index: 1;
+  width: 100%;
+  height: 100%;
   inset: 0;
-  background: conic-gradient(
-    from 0deg,
-    #c8444c 0deg var(--hold-progress),
-    transparent var(--hold-progress) 360deg
-  );
-  mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
   pointer-events: none;
-}
-
-.hold-delete-button.is-holding::before {
-  animation: hold-delete-border 4s linear forwards;
 }
 
 .hold-delete-button > span {
   position: relative;
-  z-index: 1;
-}
-
-.hold-delete-button:hover {
-  background: rgb(255 231 233 / 92%);
-}
-
-@property --hold-progress {
-  syntax: '<angle>';
-  inherits: false;
-  initial-value: 0deg;
-}
-
-@keyframes hold-delete-border {
-  to {
-    --hold-progress: 360deg;
-  }
+  z-index: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1042,10 +1010,6 @@ h1 {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
-  }
-
-  .hold-delete-button.is-holding::before {
-    animation-duration: 4s !important;
   }
 }
 
@@ -1153,9 +1117,9 @@ body {
 
 .photo-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
-  gap: clamp(10px, 1.5vw, 18px);
-  padding-top: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr));
+  gap: clamp(8px, 1vw, 12px);
+  padding-top: 16px;
 }
 
 .photo-grid-image {
