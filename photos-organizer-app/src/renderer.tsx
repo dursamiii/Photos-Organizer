@@ -1132,7 +1132,7 @@ function App() {
               </div>
               {selectedAlbum ? (
                 <>
-                  <h2>{selectedAlbum.group_name} siap diisi</h2>
+                  <h2>{selectedAlbum.group_name} masih kosong</h2>
                   <p>
                     Rentang tanggal {selectedAlbum.start_date} —{' '}
                     {selectedAlbum.end_date}

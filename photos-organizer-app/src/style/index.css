@@ -373,10 +373,15 @@ button:focus-visible {
   box-shadow: 0 8px 24px rgb(52 77 116 / 5%);
   backdrop-filter: blur(22px) saturate(155%);
   -webkit-backdrop-filter: blur(22px) saturate(155%);
+}
+
+.sticky-header,
+.sticky-header * {
   -webkit-app-region: drag;
 }
 
-.sticky-header :is(button, input, select, a, .search-box) {
+.sticky-header :is(button, input, select, a, .search-box),
+.sticky-header :is(button, input, select, a, .search-box) * {
   -webkit-app-region: no-drag;
 }
 
@@ -1139,7 +1144,6 @@ body {
   width: 100%;
   overflow: hidden;
   border-radius: var(--radius-card);
-  -webkit-app-region: no-drag;
 }
 
 .photo-tile::after {
