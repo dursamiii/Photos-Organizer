@@ -33,7 +33,6 @@ class EngineManager {
 
     this.process = spawn(pythonPath, [enginePath], {
       stdio: ['pipe', 'pipe', 'pipe'],
-
       env: {
         ...process.env,
         DYLD_LIBRARY_PATH: '/opt/homebrew/opt/vips/lib',

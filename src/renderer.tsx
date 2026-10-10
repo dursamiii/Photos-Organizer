@@ -6,11 +6,17 @@ import {
   useRef,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import './style/index.css';
 
 interface PhotoWithThumbnail extends Photo {
   thumbnail: string;
+}
+
+interface ProfileMenuPosition {
+  top: number;
+  left: number;
 }
 
 type ContextMenuState =
@@ -154,6 +160,8 @@ function App() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [profileMenuPosition, setProfileMenuPosition] =
+    useState<ProfileMenuPosition | null>(null);
   const [albumSettings, setAlbumSettings] =
     useState<AlbumSettings>(defaultAlbumSettings);
   const [settingsDraft, setSettingsDraft] =
@@ -167,7 +175,11 @@ function App() {
     hierarchy: createAlbumHierarchy(defaultAlbumSettings.hierarchyLabels),
   });
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
-  const popupCloseCallbacks = useRef(new WeakMap<Element, () => void>());
+  const profileMenuAnchorRef = useRef<HTMLDivElement | null>(null);
+  const profileMenuRef = useRef<HTMLDivElement | null>(null);
+  const popupCloseCallbacks = useRef(
+    new WeakMap<Element, { close: () => void; timer: number }>(),
+  );
 
   const fadeOutPopup = (popup: Element | null, close: () => void) => {
     if (!popup) {
@@ -175,16 +187,30 @@ function App() {
       return;
     }
     if (popup.classList.contains('is-closing')) {
-      popupCloseCallbacks.current.set(popup, close);
+      const pendingClose = popupCloseCallbacks.current.get(popup);
+      if (pendingClose) {
+        pendingClose.close = close;
+      }
       return;
     }
     popup.classList.add('is-closing');
-    popupCloseCallbacks.current.set(popup, close);
-    window.setTimeout(() => {
-      const onClose = popupCloseCallbacks.current.get(popup);
+    const pendingClose = {
+      close,
+      timer: window.setTimeout(() => {
+        const onClose = popupCloseCallbacks.current.get(popup)?.close;
+        popupCloseCallbacks.current.delete(popup);
+        onClose?.();
+      }, deleteConfirmFadeDurationMs),
+    };
+    popupCloseCallbacks.current.set(popup, pendingClose);
+  };
+
+  const cancelPopupClose = (popup: Element) => {
+    const pendingClose = popupCloseCallbacks.current.get(popup);
+    if (pendingClose) {
+      window.clearTimeout(pendingClose.timer);
       popupCloseCallbacks.current.delete(popup);
-      onClose?.();
-    }, deleteConfirmFadeDurationMs);
+    }
   };
 
   const dismissContextMenu = (afterClose?: () => void) => {
@@ -192,6 +218,31 @@ function App() {
       setContextMenu(null);
       afterClose?.();
     });
+  };
+
+  const reopenContextMenu = (nextMenu: ContextMenuState) => {
+    const popup = contextMenuRef.current;
+    if (popup) {
+      cancelPopupClose(popup);
+      popup.classList.remove('is-closing');
+      popup.style.animation = 'none';
+      popup.getBoundingClientRect();
+      popup.style.animation = '';
+    }
+    setContextMenu(nextMenu);
+  };
+
+  const openProfileMenu = () => {
+    const anchor = profileMenuAnchorRef.current;
+    if (!anchor) {
+      throw new Error('Tombol profil tidak tersedia.');
+    }
+    const bounds = anchor.getBoundingClientRect();
+    setProfileMenuPosition({
+      top: bounds.bottom + 8,
+      left: Math.max(8, bounds.right - 190),
+    });
+    setIsProfileMenuOpen(true);
   };
 
   const selectedAlbum = albums.find((album) => album.id === selectedAlbumId);
@@ -390,6 +441,9 @@ function App() {
       fadeOutPopup(contextMenuRef.current, () => setContextMenu(null));
     };
     const dismissOnOutsideClick = (event: globalThis.MouseEvent) => {
+      if (event.button === 2) {
+        return;
+      }
       if (
         event.target instanceof Element &&
         event.target.closest('[data-context-menu]')
@@ -423,20 +477,17 @@ function App() {
 
     const dismissProfileMenu = (event: globalThis.MouseEvent) => {
       if (
-        event.target instanceof Element &&
-        event.target.closest('.profile-menu-anchor')
+        event.target instanceof Node &&
+        (profileMenuAnchorRef.current?.contains(event.target) ||
+          profileMenuRef.current?.contains(event.target))
       ) {
         return;
       }
-      fadeOutPopup(document.querySelector('.profile-menu'), () =>
-        setIsProfileMenuOpen(false),
-      );
+      fadeOutPopup(profileMenuRef.current, () => setIsProfileMenuOpen(false));
     };
     const dismissOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        fadeOutPopup(document.querySelector('.profile-menu'), () =>
-          setIsProfileMenuOpen(false),
-        );
+        fadeOutPopup(profileMenuRef.current, () => setIsProfileMenuOpen(false));
       }
     };
 
@@ -497,14 +548,14 @@ function App() {
     if (target === 'album' && !('thumbnail' in item)) {
       const nextMenu = { kind: 'album' as const, album: item, ...position };
       if (contextMenuRef.current) {
-        fadeOutPopup(contextMenuRef.current, () => setContextMenu(nextMenu));
+        reopenContextMenu(nextMenu);
       } else {
         setContextMenu(nextMenu);
       }
     } else if (target === 'photo' && 'thumbnail' in item) {
       const nextMenu = { kind: 'photo' as const, photo: item, ...position };
       if (contextMenuRef.current) {
-        fadeOutPopup(contextMenuRef.current, () => setContextMenu(nextMenu));
+        reopenContextMenu(nextMenu);
       } else {
         setContextMenu(nextMenu);
       }
@@ -1169,54 +1220,24 @@ function App() {
               >
                 ?
               </button>
-              <div className="profile-menu-anchor">
+              <div className="profile-menu-anchor" ref={profileMenuAnchorRef}>
                 <button
                   className="avatar-button"
                   type="button"
                   aria-label="Profil"
                   aria-expanded={isProfileMenuOpen}
-                  onClick={(event) => {
+                  onClick={() => {
                     if (isProfileMenuOpen) {
-                      fadeOutPopup(
-                        event.currentTarget.parentElement?.querySelector(
-                          '.profile-menu',
-                        ) ?? null,
-                        () => setIsProfileMenuOpen(false),
+                      fadeOutPopup(profileMenuRef.current, () =>
+                        setIsProfileMenuOpen(false),
                       );
                     } else {
-                      setIsProfileMenuOpen(true);
+                      openProfileMenu();
                     }
                   }}
                 >
                   K
                 </button>
-                {isProfileMenuOpen && (
-                  <div
-                    className="profile-menu"
-                    data-animated-popup
-                    role="menu"
-                    aria-label="Profil"
-                  >
-                    <span className="profile-menu-heading">Profil</span>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={(event) => {
-                        fadeOutPopup(
-                          event.currentTarget.closest('.profile-menu'),
-                          () => {
-                            setSettingsDraft(albumSettings);
-                            setSettingsError('');
-                            setIsProfileMenuOpen(false);
-                            setIsSettingsModalOpen(true);
-                          },
-                        );
-                      }}
-                    >
-                      Pengaturan
-                    </button>
-                  </div>
-                )}
               </div>
             </div>
           </header>
@@ -1488,6 +1509,39 @@ function App() {
           )}
         </div>
       )}
+
+      {isProfileMenuOpen &&
+        profileMenuPosition &&
+        createPortal(
+          <div
+            className="profile-menu"
+            data-animated-popup
+            ref={profileMenuRef}
+            role="menu"
+            aria-label="Profil"
+            style={{
+              top: profileMenuPosition.top,
+              left: profileMenuPosition.left,
+            }}
+          >
+            <span className="profile-menu-heading">Profil</span>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                fadeOutPopup(profileMenuRef.current, () => {
+                  setSettingsDraft(albumSettings);
+                  setSettingsError('');
+                  setIsProfileMenuOpen(false);
+                  setIsSettingsModalOpen(true);
+                });
+              }}
+            >
+              Pengaturan
+            </button>
+          </div>,
+          document.body,
+        )}
 
       {renamingAlbum && (
         <div
