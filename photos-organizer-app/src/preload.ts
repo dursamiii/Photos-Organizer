@@ -26,6 +26,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getAlbums: () => ipcRenderer.invoke('get-albums'),
 
+  getAlbumSettings: () => ipcRenderer.invoke('get-album-settings'),
+
+  saveAlbumSettings: (settings: AlbumSettings) =>
+    ipcRenderer.invoke('save-album-settings', settings),
+
   createAlbum: (album: NewPhotoAlbum) =>
     ipcRenderer.invoke('create-album', album),
 

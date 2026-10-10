@@ -1,6 +1,7 @@
 import {
   FormEvent,
   MouseEvent as ReactMouseEvent,
+  ReactNode,
   useEffect,
   useRef,
   useState,
@@ -16,20 +17,103 @@ type ContextMenuState =
   | { kind: 'album'; album: PhotoAlbum; x: number; y: number }
   | { kind: 'photo'; photo: PhotoWithThumbnail; x: number; y: number };
 
-const currentYear = new Date().getFullYear();
-const yearOptions = Array.from({ length: 12 }, (_, index) =>
-  String(currentYear - index),
-);
-const batchOptions = Array.from(
-  { length: 12 },
-  (_, index) => `Batch ${index + 1}`,
-);
-const groupOptions = Array.from(
-  { length: 20 },
-  (_, index) => `Group ${index + 1}`,
-);
+interface AlbumHierarchyNode extends AlbumHierarchyLevel {
+  key: string;
+  children: AlbumHierarchyNode[];
+  sortDate?: string;
+  album?: PhotoAlbum;
+}
+
 const deleteHoldDurationMs = 4000;
 const deleteConfirmFadeDurationMs = 180;
+
+const defaultAlbumSettings: AlbumSettings = {
+  hierarchyLabels: ['Tahun', 'Nama Paket', 'Grup'],
+  nameByDepartureDate: false,
+};
+
+const createAlbumHierarchy = (labels: string[]): AlbumHierarchyLevel[] =>
+  labels.map((label) => ({ label, value: '' }));
+
+const formatDepartureDate = (departureDate: string): string => {
+  if (!departureDate) {
+    return '';
+  }
+  return new Intl.DateTimeFormat('id-ID', {
+    day: 'numeric',
+    month: 'long',
+    timeZone: 'UTC',
+  }).format(new Date(`${departureDate}T00:00:00.000Z`));
+};
+
+function createAlbumHierarchyTree(albums: PhotoAlbum[]): AlbumHierarchyNode[] {
+  const root: AlbumHierarchyNode[] = [];
+
+  for (const album of albums) {
+    let levelNodes = root;
+    const path: AlbumHierarchyLevel[] = [];
+
+    album.hierarchy.forEach((level, index) => {
+      path.push(level);
+      const isLeaf = index === album.hierarchy.length - 1;
+      const key = JSON.stringify({
+        path,
+        departureDate: isLeaf ? album.start_date : '',
+      });
+      let node = levelNodes.find(
+        (candidate) =>
+          candidate.label === level.label &&
+          candidate.value === level.value &&
+          (!isLeaf ||
+            !candidate.album ||
+            candidate.album.start_date === album.start_date),
+      );
+      if (!node) {
+        node = { ...level, key, children: [] };
+        levelNodes.push(node);
+      }
+
+      if (isLeaf) {
+        node.album = album;
+        node.sortDate = album.start_date || undefined;
+      }
+      levelNodes = node.children;
+    });
+  }
+
+  const sortNodes = (nodes: AlbumHierarchyNode[]): string | undefined => {
+    let earliestDate: string | undefined;
+    for (const node of nodes) {
+      const childDate = sortNodes(node.children);
+      const candidates = [node.sortDate, childDate].filter(
+        (date): date is string => Boolean(date),
+      );
+      node.sortDate = candidates.sort()[0];
+      if (node.sortDate && (!earliestDate || node.sortDate < earliestDate)) {
+        earliestDate = node.sortDate;
+      }
+    }
+    nodes.sort((left, right) => {
+      if (left.sortDate && right.sortDate) {
+        const dateOrder = left.sortDate.localeCompare(right.sortDate);
+        if (dateOrder !== 0) {
+          return dateOrder;
+        }
+      } else if (left.sortDate) {
+        return -1;
+      } else if (right.sortDate) {
+        return 1;
+      }
+      return (
+        left.label.localeCompare(right.label) ||
+        left.value.localeCompare(right.value, undefined, { numeric: true })
+      );
+    });
+    return earliestDate;
+  };
+  sortNodes(root);
+  return root;
+}
 
 function App() {
   const [albums, setAlbums] = useState<PhotoAlbum[]>([]);
@@ -59,26 +143,56 @@ function App() {
   const selectionAnchorId = useRef<number | null>(null);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
   const [hoveredPhotoId, setHoveredPhotoId] = useState<number | null>(null);
-  const [collapsedYears, setCollapsedYears] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [collapsedBatches, setCollapsedBatches] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [collapsedHierarchyNodes, setCollapsedHierarchyNodes] = useState<
+    Set<string>
+  >(() => new Set());
   const [selectedCity, setSelectedCity] = useState('Semua kota');
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [renamingAlbum, setRenamingAlbum] = useState<PhotoAlbum | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameError, setRenameError] = useState('');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [albumSettings, setAlbumSettings] =
+    useState<AlbumSettings>(defaultAlbumSettings);
+  const [settingsDraft, setSettingsDraft] =
+    useState<AlbumSettings>(defaultAlbumSettings);
+  const [settingsError, setSettingsError] = useState('');
+  const [formDepartureDate, setFormDepartureDate] = useState('');
+  const [formReturnDate, setFormReturnDate] = useState('');
+  const [formMemberCount, setFormMemberCount] = useState('1');
   const [formError, setFormError] = useState('');
   const [formValues, setFormValues] = useState({
-    year: String(currentYear),
-    batch: batchOptions[0],
-    group: groupOptions[0],
-    startDate: '',
-    endDate: '',
+    hierarchy: createAlbumHierarchy(defaultAlbumSettings.hierarchyLabels),
   });
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const popupCloseCallbacks = useRef(new WeakMap<Element, () => void>());
+
+  const fadeOutPopup = (popup: Element | null, close: () => void) => {
+    if (!popup) {
+      close();
+      return;
+    }
+    if (popup.classList.contains('is-closing')) {
+      popupCloseCallbacks.current.set(popup, close);
+      return;
+    }
+    popup.classList.add('is-closing');
+    popupCloseCallbacks.current.set(popup, close);
+    window.setTimeout(() => {
+      const onClose = popupCloseCallbacks.current.get(popup);
+      popupCloseCallbacks.current.delete(popup);
+      onClose?.();
+    }, deleteConfirmFadeDurationMs);
+  };
+
+  const dismissContextMenu = (afterClose?: () => void) => {
+    fadeOutPopup(contextMenuRef.current, () => {
+      setContextMenu(null);
+      afterClose?.();
+    });
+  };
 
   const selectedAlbum = albums.find((album) => album.id === selectedAlbumId);
   const shiftPreviewPhotoIds = new Set<number>();
@@ -107,11 +221,15 @@ function App() {
       }
     }
   }
-  const years = [...new Set(albums.map((album) => album.year))].sort(
-    (left, right) => Number(left) - Number(right),
-  );
+  const albumHierarchyTree = createAlbumHierarchyTree(albums);
 
   const openCreateModal = () => {
+    setFormValues({
+      hierarchy: createAlbumHierarchy(albumSettings.hierarchyLabels),
+    });
+    setFormDepartureDate('');
+    setFormReturnDate('');
+    setFormMemberCount('1');
     setFormError('');
     setIsCreateModalOpen(true);
   };
@@ -176,6 +294,18 @@ function App() {
       });
 
     return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    window.electronAPI
+      .getAlbumSettings()
+      .then((savedSettings) => {
+        setAlbumSettings(savedSettings);
+        setSettingsDraft(savedSettings);
+      })
+      .catch((error: unknown) => {
+        console.error('Failed to load album settings.', error);
+      });
   }, []);
 
   useEffect(() => {
@@ -257,7 +387,7 @@ function App() {
     }
 
     const dismissMenu = () => {
-      setContextMenu(null);
+      fadeOutPopup(contextMenuRef.current, () => setContextMenu(null));
     };
     const dismissOnOutsideClick = (event: globalThis.MouseEvent) => {
       if (
@@ -266,11 +396,11 @@ function App() {
       ) {
         return;
       }
-      setContextMenu(null);
+      fadeOutPopup(contextMenuRef.current, () => setContextMenu(null));
     };
     const dismissOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setContextMenu(null);
+        fadeOutPopup(contextMenuRef.current, () => setContextMenu(null));
       }
     };
 
@@ -285,6 +415,38 @@ function App() {
       window.removeEventListener('resize', dismissMenu);
     };
   }, [contextMenu]);
+
+  useEffect(() => {
+    if (!isProfileMenuOpen) {
+      return;
+    }
+
+    const dismissProfileMenu = (event: globalThis.MouseEvent) => {
+      if (
+        event.target instanceof Element &&
+        event.target.closest('.profile-menu-anchor')
+      ) {
+        return;
+      }
+      fadeOutPopup(document.querySelector('.profile-menu'), () =>
+        setIsProfileMenuOpen(false),
+      );
+    };
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        fadeOutPopup(document.querySelector('.profile-menu'), () =>
+          setIsProfileMenuOpen(false),
+        );
+      }
+    };
+
+    document.addEventListener('mousedown', dismissProfileMenu);
+    document.addEventListener('keydown', dismissOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', dismissProfileMenu);
+      document.removeEventListener('keydown', dismissOnEscape);
+    };
+  }, [isProfileMenuOpen]);
 
   useEffect(() => {
     const updateShiftState = (event: KeyboardEvent) => {
@@ -333,40 +495,95 @@ function App() {
     };
 
     if (target === 'album' && !('thumbnail' in item)) {
-      setContextMenu({ kind: 'album', album: item, ...position });
+      const nextMenu = { kind: 'album' as const, album: item, ...position };
+      if (contextMenuRef.current) {
+        fadeOutPopup(contextMenuRef.current, () => setContextMenu(nextMenu));
+      } else {
+        setContextMenu(nextMenu);
+      }
     } else if (target === 'photo' && 'thumbnail' in item) {
-      setContextMenu({ kind: 'photo', photo: item, ...position });
+      const nextMenu = { kind: 'photo' as const, photo: item, ...position };
+      if (contextMenuRef.current) {
+        fadeOutPopup(contextMenuRef.current, () => setContextMenu(nextMenu));
+      } else {
+        setContextMenu(nextMenu);
+      }
     }
   }
 
   const createAlbum = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (formValues.endDate < formValues.startDate) {
-      setFormError('Tanggal akhir harus sama atau setelah tanggal awal.');
+    const popup = event.currentTarget.closest('[data-animated-popup]');
+    const hierarchy = formValues.hierarchy.map((level) => ({
+      label: level.label.trim(),
+      value: level.value.trim(),
+    }));
+    hierarchy[0].label = 'Tahun';
+    hierarchy[0].value = formDepartureDate.slice(0, 4);
+    if (!formDepartureDate) {
+      setFormError('Pilih tanggal keberangkatan album.');
+      return;
+    }
+    if (!formReturnDate || formReturnDate < formDepartureDate) {
+      setFormError(
+        'Tanggal kepulangan harus sama atau setelah tanggal keberangkatan.',
+      );
+      return;
+    }
+    const memberCount = Number(formMemberCount);
+    if (!Number.isInteger(memberCount) || memberCount < 1) {
+      setFormError('Jumlah anggota harus berupa bilangan bulat minimal 1.');
+      return;
+    }
+    if (albumSettings.nameByDepartureDate) {
+      hierarchy[hierarchy.length - 1].value =
+        formatDepartureDate(formDepartureDate);
+    }
+    if (
+      hierarchy.length < 2 ||
+      hierarchy.some(
+        (level, index) =>
+          !level.label ||
+          (!level.value &&
+            !(
+              albumSettings.nameByDepartureDate &&
+              index === hierarchy.length - 1
+            )),
+      )
+    ) {
+      setFormError('Isi semua nilai level dan tanggal keberangkatan.');
       return;
     }
 
     try {
       const album = await window.electronAPI.createAlbum({
-        year: formValues.year,
-        batch: formValues.batch,
-        groupName: formValues.group,
-        startDate: formValues.startDate,
-        endDate: formValues.endDate,
+        hierarchy,
+        departureDate: formDepartureDate,
+        returnDate: formReturnDate,
+        memberCount,
       });
       setAlbums((current) => [...current, album]);
       setSelectedAlbumId(album.id);
-      setCollapsedYears((current) => {
+      setCollapsedHierarchyNodes((current) => {
         const next = new Set(current);
-        next.delete(album.year);
+        album.hierarchy.forEach((_, index) => {
+          next.delete(
+            JSON.stringify({
+              path: album.hierarchy.slice(0, index + 1),
+              departureDate:
+                index === album.hierarchy.length - 1 ? album.start_date : '',
+            }),
+          );
+        });
         return next;
       });
-      setCollapsedBatches((current) => {
-        const next = new Set(current);
-        next.delete(`${album.year}:${album.batch}`);
-        return next;
+      setFormValues({
+        hierarchy: createAlbumHierarchy(albumSettings.hierarchyLabels),
       });
-      setIsCreateModalOpen(false);
+      setFormDepartureDate('');
+      setFormReturnDate('');
+      setFormMemberCount('1');
+      fadeOutPopup(popup, () => setIsCreateModalOpen(false));
       setFormError('');
     } catch (error) {
       setFormError(
@@ -377,8 +594,28 @@ function App() {
     }
   };
 
+  const saveAlbumSettings = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const popup = event.currentTarget.closest('[data-animated-popup]');
+    try {
+      const savedSettings =
+        await window.electronAPI.saveAlbumSettings(settingsDraft);
+      setAlbumSettings(savedSettings);
+      setSettingsDraft(savedSettings);
+      fadeOutPopup(popup, () => setIsSettingsModalOpen(false));
+      setSettingsError('');
+    } catch (error) {
+      setSettingsError(
+        error instanceof Error
+          ? error.message
+          : 'Pengaturan album gagal disimpan.',
+      );
+    }
+  };
+
   const renameAlbum = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const popup = event.currentTarget.closest('[data-animated-popup]');
     if (!renamingAlbum) {
       return;
     }
@@ -393,7 +630,7 @@ function App() {
           album.id === updatedAlbum.id ? updatedAlbum : album,
         ),
       );
-      setRenamingAlbum(null);
+      fadeOutPopup(popup, () => setRenamingAlbum(null));
       setRenameError('');
     } catch (error) {
       setRenameError(
@@ -739,33 +976,75 @@ function App() {
     [],
   );
 
-  const toggleYear = (year: string) => {
-    setCollapsedYears((current) => {
+  const toggleHierarchyNode = (nodeKey: string) => {
+    setCollapsedHierarchyNodes((current) => {
       const next = new Set(current);
-      if (next.has(year)) {
-        next.delete(year);
+      if (next.has(nodeKey)) {
+        next.delete(nodeKey);
       } else {
-        next.add(year);
+        next.add(nodeKey);
       }
       return next;
     });
   };
 
-  const toggleBatch = (batchKey: string) => {
-    setCollapsedBatches((current) => {
-      const next = new Set(current);
-      if (next.has(batchKey)) {
-        next.delete(batchKey);
-      } else {
-        next.add(batchKey);
-      }
-      return next;
-    });
+  const updateHierarchyLevel = (
+    index: number,
+    field: keyof AlbumHierarchyLevel,
+    value: string,
+  ) => {
+    setFormValues((current) => ({
+      hierarchy: current.hierarchy.map((level, levelIndex) =>
+        levelIndex === index ? { ...level, [field]: value } : level,
+      ),
+    }));
   };
 
-  const updateForm = (field: keyof typeof formValues, value: string) => {
-    setFormValues((current) => ({ ...current, [field]: value }));
-  };
+  const albumHierarchyNodes = (
+    nodes: AlbumHierarchyNode[],
+    depth = 0,
+  ): ReactNode =>
+    nodes.map((node) => {
+      const album = node.album;
+      const albumButton = album ? (
+        <button
+          className={`tree-group${selectedAlbumId === album.id ? ' is-selected' : ''}`}
+          type="button"
+          aria-pressed={selectedAlbumId === album.id}
+          key={album.id}
+          onClick={() => setSelectedAlbumId(album.id)}
+          onContextMenu={(event) => openContextMenu(event, 'album', album)}
+        >
+          <span>{node.value}</span>
+        </button>
+      ) : null;
+
+      const isExpanded = !collapsedHierarchyNodes.has(node.key);
+      return (
+        <div className={`tree-branch tree-depth-${depth}`} key={node.key}>
+          {albumButton}
+          {node.children.length > 0 && (
+            <>
+              <button
+                className={`tree-parent tree-parent-depth-${depth}`}
+                type="button"
+                aria-expanded={isExpanded}
+                onClick={() => toggleHierarchyNode(node.key)}
+              >
+                <span
+                  className={`tree-chevron${isExpanded ? ' is-expanded' : ''}`}
+                  aria-hidden="true"
+                >
+                  ⌄
+                </span>
+                <span>{node.value}</span>
+              </button>
+              {isExpanded && albumHierarchyNodes(node.children, depth + 1)}
+            </>
+          )}
+        </div>
+      );
+    });
 
   const uploadToSelectedAlbum = async () => {
     if (!selectedAlbum) {
@@ -827,86 +1106,7 @@ function App() {
           </div>
         ) : (
           <nav className="album-tree" aria-label="Album foto">
-            {years.map((year) => {
-              const batches = [
-                ...new Set(
-                  albums
-                    .filter((album) => album.year === year)
-                    .map((album) => album.batch),
-                ),
-              ].sort((left, right) =>
-                left.localeCompare(right, undefined, { numeric: true }),
-              );
-              const isYearExpanded = !collapsedYears.has(year);
-
-              return (
-                <section className="tree-year" key={year}>
-                  <button
-                    className="tree-parent tree-year-button"
-                    type="button"
-                    aria-expanded={isYearExpanded}
-                    onClick={() => toggleYear(year)}
-                  >
-                    <span
-                      className={`tree-chevron${isYearExpanded ? ' is-expanded' : ''}`}
-                      aria-hidden="true"
-                    >
-                      ⌄
-                    </span>
-                    <span className="tree-icon" aria-hidden="true">
-                      ▱
-                    </span>
-                    <span>{year}</span>
-                  </button>
-                  {isYearExpanded &&
-                    batches.map((batch) => {
-                      const batchKey = `${year}:${batch}`;
-                      const isBatchExpanded = !collapsedBatches.has(batchKey);
-                      const batchAlbums = albums.filter(
-                        (album) => album.year === year && album.batch === batch,
-                      );
-
-                      return (
-                        <div className="tree-batch" key={batchKey}>
-                          <button
-                            className="tree-parent tree-batch-button"
-                            type="button"
-                            aria-expanded={isBatchExpanded}
-                            onClick={() => toggleBatch(batchKey)}
-                          >
-                            <span
-                              className={`tree-chevron${isBatchExpanded ? ' is-expanded' : ''}`}
-                              aria-hidden="true"
-                            >
-                              ⌄
-                            </span>
-                            <span className="tree-icon" aria-hidden="true">
-                              ▱
-                            </span>
-                            <span>{batch}</span>
-                          </button>
-                          {isBatchExpanded &&
-                            batchAlbums.map((album) => (
-                              <button
-                                className={`tree-group${selectedAlbumId === album.id ? ' is-selected' : ''}`}
-                                type="button"
-                                aria-pressed={selectedAlbumId === album.id}
-                                key={album.id}
-                                onClick={() => setSelectedAlbumId(album.id)}
-                                onContextMenu={(event) =>
-                                  openContextMenu(event, 'album', album)
-                                }
-                              >
-                                <span aria-hidden="true">♧</span>
-                                <span>{album.group_name}</span>
-                              </button>
-                            ))}
-                        </div>
-                      );
-                    })}
-                </section>
-              );
-            })}
+            {albumHierarchyNodes(albumHierarchyTree)}
             <button
               className="tree-add-button"
               type="button"
@@ -938,7 +1138,7 @@ function App() {
               <input
                 type="search"
                 aria-label="Cari foto atau album"
-                placeholder="Cari berdasarkan tahun, batch, grup..."
+                placeholder="Cari berdasarkan nama album..."
               />
               <kbd>⌘ K</kbd>
             </label>
@@ -969,13 +1169,55 @@ function App() {
               >
                 ?
               </button>
-              <button
-                className="avatar-button"
-                type="button"
-                aria-label="Profil"
-              >
-                K
-              </button>
+              <div className="profile-menu-anchor">
+                <button
+                  className="avatar-button"
+                  type="button"
+                  aria-label="Profil"
+                  aria-expanded={isProfileMenuOpen}
+                  onClick={(event) => {
+                    if (isProfileMenuOpen) {
+                      fadeOutPopup(
+                        event.currentTarget.parentElement?.querySelector(
+                          '.profile-menu',
+                        ) ?? null,
+                        () => setIsProfileMenuOpen(false),
+                      );
+                    } else {
+                      setIsProfileMenuOpen(true);
+                    }
+                  }}
+                >
+                  K
+                </button>
+                {isProfileMenuOpen && (
+                  <div
+                    className="profile-menu"
+                    data-animated-popup
+                    role="menu"
+                    aria-label="Profil"
+                  >
+                    <span className="profile-menu-heading">Profil</span>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={(event) => {
+                        fadeOutPopup(
+                          event.currentTarget.closest('.profile-menu'),
+                          () => {
+                            setSettingsDraft(albumSettings);
+                            setSettingsError('');
+                            setIsProfileMenuOpen(false);
+                            setIsSettingsModalOpen(true);
+                          },
+                        );
+                      }}
+                    >
+                      Pengaturan
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </header>
           <div
@@ -1134,8 +1376,9 @@ function App() {
                 <>
                   <h2>{selectedAlbum.group_name} masih kosong</h2>
                   <p>
-                    Rentang tanggal {selectedAlbum.start_date} —{' '}
-                    {selectedAlbum.end_date}
+                    {selectedAlbum.hierarchy
+                      .map((level) => `${level.label}: ${level.value}`)
+                      .join(' · ')}
                   </p>
                   <p className="empty-hint">
                     Foto yang diunggah akan masuk ke album ini.
@@ -1150,7 +1393,7 @@ function App() {
                   </h2>
                   <p>
                     {albums.length === 0
-                      ? 'Buat struktur tahun, batch, dan grup untuk menata foto perjalanan.'
+                      ? 'Tentukan sendiri nama dan susunan level album untuk menata foto perjalanan.'
                       : 'Pilih album dari panel navigasi untuk melihat dan mengelola fotonya.'}
                   </p>
                   {albums.length === 0 && (
@@ -1174,6 +1417,8 @@ function App() {
         <div
           className="context-menu"
           data-context-menu
+          data-animated-popup
+          ref={contextMenuRef}
           role="menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onContextMenu={(event) => event.preventDefault()}
@@ -1184,10 +1429,11 @@ function App() {
                 type="button"
                 role="menuitem"
                 onClick={() => {
-                  setRenamingAlbum(contextMenu.album);
-                  setRenameValue(contextMenu.album.group_name);
-                  setRenameError('');
-                  setContextMenu(null);
+                  dismissContextMenu(() => {
+                    setRenamingAlbum(contextMenu.album);
+                    setRenameValue(contextMenu.album.group_name);
+                    setRenameError('');
+                  });
                 }}
               >
                 Ganti nama album
@@ -1203,8 +1449,7 @@ function App() {
                     : undefined
                 }
                 onClick={() => {
-                  setContextMenu(null);
-                  void deleteAlbum(contextMenu.album);
+                  dismissContextMenu(() => void deleteAlbum(contextMenu.album));
                 }}
               >
                 Hapus album
@@ -1216,12 +1461,13 @@ function App() {
                 type="button"
                 role="menuitem"
                 onClick={() => {
-                  if (selectedPhotoIds.has(contextMenu.photo.id)) {
-                    togglePhotoSelection(contextMenu.photo.id);
-                  } else {
-                    selectPhoto(contextMenu.photo.id);
-                  }
-                  setContextMenu(null);
+                  dismissContextMenu(() => {
+                    if (selectedPhotoIds.has(contextMenu.photo.id)) {
+                      togglePhotoSelection(contextMenu.photo.id);
+                    } else {
+                      selectPhoto(contextMenu.photo.id);
+                    }
+                  });
                 }}
               >
                 {selectedPhotoIds.has(contextMenu.photo.id)
@@ -1233,8 +1479,7 @@ function App() {
                 type="button"
                 role="menuitem"
                 onClick={() => {
-                  setContextMenu(null);
-                  void deletePhoto(contextMenu.photo);
+                  dismissContextMenu(() => void deletePhoto(contextMenu.photo));
                 }}
               >
                 Hapus foto
@@ -1247,10 +1492,13 @@ function App() {
       {renamingAlbum && (
         <div
           className="modal-backdrop"
+          data-animated-popup
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) {
-              setRenamingAlbum(null);
-              setRenameError('');
+              fadeOutPopup(event.currentTarget, () => {
+                setRenamingAlbum(null);
+                setRenameError('');
+              });
             }
           }}
         >
@@ -1269,9 +1517,14 @@ function App() {
                 className="icon-button modal-close"
                 type="button"
                 aria-label="Tutup"
-                onClick={() => {
-                  setRenamingAlbum(null);
-                  setRenameError('');
+                onClick={(event) => {
+                  fadeOutPopup(
+                    event.currentTarget.closest('[data-animated-popup]'),
+                    () => {
+                      setRenamingAlbum(null);
+                      setRenameError('');
+                    },
+                  );
                 }}
               >
                 ×
@@ -1279,7 +1532,7 @@ function App() {
             </div>
             <form onSubmit={renameAlbum}>
               <label>
-                Nama grup
+                Nama album
                 <input
                   autoFocus
                   required
@@ -1293,9 +1546,14 @@ function App() {
                 <button
                   className="secondary-button"
                   type="button"
-                  onClick={() => {
-                    setRenamingAlbum(null);
-                    setRenameError('');
+                  onClick={(event) => {
+                    fadeOutPopup(
+                      event.currentTarget.closest('[data-animated-popup]'),
+                      () => {
+                        setRenamingAlbum(null);
+                        setRenameError('');
+                      },
+                    );
                   }}
                 >
                   Batal
@@ -1309,12 +1567,171 @@ function App() {
         </div>
       )}
 
+      {isSettingsModalOpen && (
+        <div
+          className="modal-backdrop"
+          data-animated-popup
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              fadeOutPopup(event.currentTarget, () =>
+                setIsSettingsModalOpen(false),
+              );
+            }
+          }}
+        >
+          <section
+            className="album-modal settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="album-settings-title"
+          >
+            <div className="modal-heading">
+              <div>
+                <p className="eyebrow">PROFIL</p>
+                <h2 id="album-settings-title">Pengaturan album</h2>
+              </div>
+              <button
+                className="icon-button modal-close"
+                type="button"
+                aria-label="Tutup"
+                onClick={(event) =>
+                  fadeOutPopup(
+                    event.currentTarget.closest('[data-animated-popup]'),
+                    () => setIsSettingsModalOpen(false),
+                  )
+                }
+              >
+                ×
+              </button>
+            </div>
+            <p className="modal-description">
+              Atur susunan level yang akan digunakan saat membuat album baru.
+              Album yang sudah ada tidak berubah.
+            </p>
+
+            <form onSubmit={saveAlbumSettings}>
+              <div className="settings-section-heading">Level album</div>
+              <div className="hierarchy-editor">
+                {settingsDraft.hierarchyLabels.map((label, index) => (
+                  <div className="settings-level-row" key={index}>
+                    <span className="hierarchy-editor-index">{index + 1}</span>
+                    <label>
+                      {index === 0 ? 'Level tetap' : 'Nama level'}
+                      <input
+                        required={index !== 0}
+                        maxLength={40}
+                        value={label}
+                        readOnly={index === 0}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          setSettingsDraft((current) => ({
+                            ...current,
+                            hierarchyLabels: current.hierarchyLabels.map(
+                              (currentLabel, levelIndex) =>
+                                levelIndex === index ? value : currentLabel,
+                            ),
+                          }));
+                        }}
+                      />
+                    </label>
+                    {index === 0 ? (
+                      <span
+                        className="settings-level-locked"
+                        aria-hidden="true"
+                      >
+                        Terkunci
+                      </span>
+                    ) : (
+                      <button
+                        className="icon-button hierarchy-remove-button"
+                        type="button"
+                        aria-label={`Hapus level ${index + 1}`}
+                        title={
+                          settingsDraft.hierarchyLabels.length <= 2
+                            ? 'Level album minimal dua'
+                            : 'Hapus level'
+                        }
+                        disabled={settingsDraft.hierarchyLabels.length <= 2}
+                        onClick={() =>
+                          setSettingsDraft((current) => ({
+                            ...current,
+                            hierarchyLabels: current.hierarchyLabels.filter(
+                              (_, levelIndex) => levelIndex !== index,
+                            ),
+                          }))
+                        }
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                ))}
+                <button
+                  className="text-button hierarchy-add-button"
+                  type="button"
+                  disabled={settingsDraft.hierarchyLabels.length >= 10}
+                  onClick={() =>
+                    setSettingsDraft((current) => ({
+                      ...current,
+                      hierarchyLabels: [...current.hierarchyLabels, ''],
+                    }))
+                  }
+                >
+                  + Tambah level
+                </button>
+              </div>
+
+              <label className="settings-toggle">
+                <input
+                  type="checkbox"
+                  checked={settingsDraft.nameByDepartureDate}
+                  onChange={(event) =>
+                    setSettingsDraft((current) => ({
+                      ...current,
+                      nameByDepartureDate: event.target.checked,
+                    }))
+                  }
+                />
+                <span>
+                  <strong>Namakan album sesuai tanggal keberangkatan</strong>
+                  <small>
+                    Level terakhir otomatis memakai format seperti “5 November”.
+                  </small>
+                </span>
+              </label>
+
+              {settingsError && <p className="form-error">{settingsError}</p>}
+              <div className="modal-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={(event) =>
+                    fadeOutPopup(
+                      event.currentTarget.closest('[data-animated-popup]'),
+                      () => setIsSettingsModalOpen(false),
+                    )
+                  }
+                >
+                  Batal
+                </button>
+                <button className="primary-button" type="submit">
+                  Simpan pengaturan
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
       {isCreateModalOpen && (
         <div
           className="modal-backdrop"
+          data-animated-popup
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) {
-              setIsCreateModalOpen(false);
+              fadeOutPopup(event.currentTarget, () =>
+                setIsCreateModalOpen(false),
+              );
             }
           }}
         >
@@ -1333,93 +1750,127 @@ function App() {
                 className="icon-button modal-close"
                 type="button"
                 aria-label="Tutup"
-                onClick={() => setIsCreateModalOpen(false)}
+                onClick={(event) =>
+                  fadeOutPopup(
+                    event.currentTarget.closest('[data-animated-popup]'),
+                    () => setIsCreateModalOpen(false),
+                  )
+                }
               >
                 ×
               </button>
             </div>
             <p className="modal-description">
-              Tentukan periode dan grup untuk mengatur foto-fotomu.
+              Isi nilai untuk setiap level dan tentukan tanggal keberangkatan
+              album.
             </p>
 
             <form onSubmit={createAlbum}>
-              <div className="form-row">
+              <div className="album-date-fields">
                 <label>
-                  Tahun
-                  <select
-                    value={formValues.year}
-                    onChange={(event) => updateForm('year', event.target.value)}
-                  >
-                    {yearOptions.map((year) => (
-                      <option key={year} value={year}>
-                        {year}
-                      </option>
-                    ))}
-                  </select>
+                  Tanggal keberangkatan
+                  <input
+                    type="date"
+                    required
+                    value={formDepartureDate}
+                    onChange={(event) =>
+                      setFormDepartureDate(event.target.value)
+                    }
+                  />
                 </label>
                 <label>
-                  Batch
-                  <select
-                    value={formValues.batch}
-                    onChange={(event) =>
-                      updateForm('batch', event.target.value)
-                    }
-                  >
-                    {batchOptions.map((batch) => (
-                      <option key={batch} value={batch}>
-                        {batch}
-                      </option>
-                    ))}
-                  </select>
+                  Tanggal kepulangan
+                  <input
+                    type="date"
+                    required
+                    min={formDepartureDate || undefined}
+                    value={formReturnDate}
+                    onChange={(event) => setFormReturnDate(event.target.value)}
+                  />
                 </label>
               </div>
-              <label>
-                Grup
-                <select
-                  value={formValues.group}
-                  onChange={(event) => updateForm('group', event.target.value)}
-                >
-                  {groupOptions.map((group) => (
-                    <option key={group} value={group}>
-                      {group}
-                    </option>
-                  ))}
-                </select>
+              <div className="hierarchy-editor">
+                {formValues.hierarchy.map((level, index) => (
+                  <div className="hierarchy-editor-row" key={index}>
+                    <span className="hierarchy-editor-index">{index + 1}</span>
+                    <label>
+                      {index === 0 ? 'Tahun (otomatis)' : level.label}
+                      <input
+                        required={
+                          index !== 0 &&
+                          !(
+                            albumSettings.nameByDepartureDate &&
+                            index === formValues.hierarchy.length - 1
+                          )
+                        }
+                        readOnly={
+                          index === 0 ||
+                          (albumSettings.nameByDepartureDate &&
+                            index === formValues.hierarchy.length - 1)
+                        }
+                        maxLength={100}
+                        placeholder={
+                          index === 0
+                            ? 'Terisi dari tanggal keberangkatan'
+                            : albumSettings.nameByDepartureDate &&
+                                index === formValues.hierarchy.length - 1
+                              ? 'Diisi dari tanggal keberangkatan'
+                              : `Isi ${level.label.toLocaleLowerCase()}`
+                        }
+                        value={
+                          index === 0
+                            ? formDepartureDate.slice(0, 4)
+                            : albumSettings.nameByDepartureDate &&
+                                index === formValues.hierarchy.length - 1
+                              ? formatDepartureDate(formDepartureDate)
+                              : level.value
+                        }
+                        onChange={(event) =>
+                          updateHierarchyLevel(
+                            index,
+                            'value',
+                            event.target.value,
+                          )
+                        }
+                      />
+                    </label>
+                  </div>
+                ))}
+              </div>
+              <label className="member-count-field">
+                <span>
+                  Jumlah anggota
+                  <span
+                    className="field-help"
+                    role="img"
+                    tabIndex={0}
+                    aria-label="Jumlah anggota akan digunakan untuk fitur pengenalan wajah menentukan anggota perjalanan."
+                    title="Jumlah anggota akan digunakan oleh fitur pengenalan wajah untuk menentukan siapa saja yang merupakan anggota dalam perjalanan."
+                  >
+                    ?
+                  </span>
+                </span>
+                <input
+                  type="number"
+                  min="1"
+                  max="100000"
+                  step="1"
+                  required
+                  value={formMemberCount}
+                  onChange={(event) => setFormMemberCount(event.target.value)}
+                />
               </label>
-              <fieldset>
-                <legend>Rentang tanggal</legend>
-                <div className="form-row">
-                  <label>
-                    Dari
-                    <input
-                      type="date"
-                      required
-                      value={formValues.startDate}
-                      onChange={(event) =>
-                        updateForm('startDate', event.target.value)
-                      }
-                    />
-                  </label>
-                  <label>
-                    Sampai
-                    <input
-                      type="date"
-                      required
-                      min={formValues.startDate || undefined}
-                      value={formValues.endDate}
-                      onChange={(event) =>
-                        updateForm('endDate', event.target.value)
-                      }
-                    />
-                  </label>
-                </div>
-              </fieldset>
               {formError && <p className="form-error">{formError}</p>}
               <div className="modal-actions">
                 <button
                   className="secondary-button"
                   type="button"
-                  onClick={() => setIsCreateModalOpen(false)}
+                  onClick={(event) =>
+                    fadeOutPopup(
+                      event.currentTarget.closest('[data-animated-popup]'),
+                      () => setIsCreateModalOpen(false),
+                    )
+                  }
                 >
                   Batal
                 </button>

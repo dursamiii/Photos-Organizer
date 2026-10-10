@@ -4,6 +4,7 @@ import started from 'electron-squirrel-startup';
 import { engine } from './services/engine-manager';
 import { registerAlbumHandlers } from './services/album';
 import { registerPhotoHandlers } from './services/photos';
+import { registerSettingsHandlers } from './services/settings';
 
 const handleOutputStreamError = (error: Error & { code?: string }) => {
   if (error.code !== 'EPIPE') {
@@ -123,6 +124,7 @@ const createWindow = () => {
 
 registerAlbumHandlers();
 registerPhotoHandlers();
+registerSettingsHandlers();
 
 if (hasSingleInstanceLock) {
   app.whenReady().then(() => {

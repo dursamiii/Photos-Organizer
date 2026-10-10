@@ -16,21 +16,32 @@ interface Photo {
 
 interface PhotoAlbum {
   id: number;
+  hierarchy: AlbumHierarchyLevel[];
   year: string;
   batch: string;
   group_name: string;
   start_date: string;
   end_date: string;
+  member_count: number;
   created_at: string;
   photo_count: number;
 }
 
+interface AlbumHierarchyLevel {
+  label: string;
+  value: string;
+}
+
 interface NewPhotoAlbum {
-  year: string;
-  batch: string;
-  groupName: string;
-  startDate: string;
-  endDate: string;
+  hierarchy: AlbumHierarchyLevel[];
+  departureDate: string;
+  returnDate: string;
+  memberCount: number;
+}
+
+interface AlbumSettings {
+  hierarchyLabels: string[];
+  nameByDepartureDate: boolean;
 }
 
 interface ImportProgress {
@@ -56,6 +67,8 @@ interface Window {
     ) => () => void;
     getPhotos: (albumId?: number) => Promise<Photo[]>;
     getAlbums: () => Promise<PhotoAlbum[]>;
+    getAlbumSettings: () => Promise<AlbumSettings>;
+    saveAlbumSettings: (settings: AlbumSettings) => Promise<AlbumSettings>;
     createAlbum: (album: NewPhotoAlbum) => Promise<PhotoAlbum>;
     renameAlbum: (albumId: number, groupName: string) => Promise<PhotoAlbum>;
     deleteAlbum: (albumId: number) => Promise<boolean>;

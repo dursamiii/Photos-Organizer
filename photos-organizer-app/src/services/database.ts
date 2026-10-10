@@ -5,7 +5,13 @@ import path from 'node:path';
 const databasePath = path.join(app.getPath('userData'), 'photos-organizer.db');
 
 const db = new Database(databasePath);
-db.pragma('foreign_keys = ON');
+db.pragma('foreign_keys = OFF');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+`);
 
 const tableExists = (tableName: string) =>
   Boolean(
@@ -35,8 +41,9 @@ const migrateSchema = db.transaction(() => {
         group_name TEXT NOT NULL,
         start_date TEXT NOT NULL,
         end_date TEXT NOT NULL,
+        member_count INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
-        UNIQUE (year, batch, group_name)
+        hierarchy_json TEXT NOT NULL DEFAULT '[]'
       );
     `);
   }
@@ -139,6 +146,113 @@ const migrateSchema = db.transaction(() => {
 });
 
 migrateSchema();
+const albumColumns = db.pragma('table_info(albums)') as Array<{
+  name: string;
+}>;
+if (!albumColumns.some((column) => column.name === 'hierarchy_json')) {
+  db.exec(
+    "ALTER TABLE albums ADD COLUMN hierarchy_json TEXT NOT NULL DEFAULT '[]'",
+  );
+}
+if (!albumColumns.some((column) => column.name === 'member_count')) {
+  db.exec(
+    'ALTER TABLE albums ADD COLUMN member_count INTEGER NOT NULL DEFAULT 0',
+  );
+}
+
+const albumsWithEmptyHierarchy = db
+  .prepare(
+    "SELECT id, year, batch, group_name FROM albums WHERE hierarchy_json = '[]'",
+  )
+  .all() as Array<{
+  id: number;
+  year: string;
+  batch: string;
+  group_name: string;
+}>;
+const backfillAlbumHierarchy = db.transaction(() => {
+  const updateAlbum = db.prepare(
+    'UPDATE albums SET hierarchy_json = ? WHERE id = ?',
+  );
+  for (const album of albumsWithEmptyHierarchy) {
+    updateAlbum.run(
+      JSON.stringify([
+        { label: 'Tahun', value: album.year },
+        { label: 'Batch', value: album.batch },
+        { label: 'Grup', value: album.group_name },
+      ]),
+      album.id,
+    );
+  }
+});
+backfillAlbumHierarchy();
+
+const albumIndexes = db.pragma('index_list(albums)') as Array<{
+  origin: string;
+}>;
+if (albumIndexes.some((index) => index.origin === 'u')) {
+  const rebuildAlbums = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE albums_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        year TEXT NOT NULL,
+        batch TEXT NOT NULL,
+        group_name TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        member_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        hierarchy_json TEXT NOT NULL DEFAULT '[]'
+      );
+
+      INSERT INTO albums_new (
+        id,
+        year,
+        batch,
+        group_name,
+        start_date,
+        end_date,
+        member_count,
+        created_at,
+        hierarchy_json
+      )
+      SELECT
+        id,
+        year,
+        batch,
+        group_name,
+        start_date,
+        end_date,
+        member_count,
+        created_at,
+        hierarchy_json
+      FROM albums;
+
+      DROP TABLE albums;
+      ALTER TABLE albums_new RENAME TO albums;
+    `);
+  });
+  rebuildAlbums();
+}
+
 db.exec('CREATE INDEX IF NOT EXISTS idx_photos_album_id ON photos(album_id)');
+if (
+  db
+    .prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_albums_hierarchy_json'",
+    )
+    .get()
+) {
+  db.exec('DROP INDEX idx_albums_hierarchy_json');
+}
+db.exec(
+  'CREATE UNIQUE INDEX IF NOT EXISTS idx_albums_hierarchy_date ON albums(hierarchy_json, start_date)',
+);
+db.pragma('foreign_keys = ON');
+
+const foreignKeyErrors = db.pragma('foreign_key_check') as Array<unknown>;
+if (foreignKeyErrors.length > 0) {
+  throw new Error('Album migration produced invalid photo references.');
+}
 
 export default db;
