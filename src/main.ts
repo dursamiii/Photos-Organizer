@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
 import { engine } from './services/engine-manager';
@@ -125,6 +125,14 @@ const createWindow = () => {
 registerAlbumHandlers();
 registerPhotoHandlers();
 registerSettingsHandlers();
+ipcMain.on('set-photo-preview-active', (event, active: boolean) => {
+  if (process.platform !== 'darwin' || typeof active !== 'boolean') {
+    return;
+  }
+  BrowserWindow.fromWebContents(event.sender)?.setWindowButtonVisibility(
+    !active,
+  );
+});
 
 if (hasSingleInstanceLock) {
   app.whenReady().then(() => {

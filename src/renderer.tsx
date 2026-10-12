@@ -14,6 +14,11 @@ interface PhotoWithThumbnail extends Photo {
   thumbnail: string;
 }
 
+interface PhotoPreviewState {
+  photo: PhotoWithThumbnail;
+  imageSrc: string | null;
+}
+
 interface ProfileMenuPosition {
   top: number;
   left: number;
@@ -121,9 +126,43 @@ function createAlbumHierarchyTree(albums: PhotoAlbum[]): AlbumHierarchyNode[] {
   return root;
 }
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = bytes / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function formatPhotoDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return 'Tanggal tidak tersedia';
+  }
+  return new Intl.DateTimeFormat('id-ID', {
+    dateStyle: 'long',
+    timeStyle: 'short',
+  }).format(date);
+}
+
 function App() {
   const [albums, setAlbums] = useState<PhotoAlbum[]>([]);
   const [photos, setPhotos] = useState<PhotoWithThumbnail[]>([]);
+  const [photoPreview, setPhotoPreview] = useState<PhotoPreviewState | null>(
+    null,
+  );
+  const [isPhotoPreviewClosing, setIsPhotoPreviewClosing] = useState(false);
+  const [previewDimensions, setPreviewDimensions] = useState<{
+    photoId: number;
+    width: number;
+    height: number;
+  } | null>(null);
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(
     null,
   );
@@ -147,6 +186,8 @@ function App() {
     typeof setTimeout
   > | null>(null);
   const selectionAnchorId = useRef<number | null>(null);
+  const photoPreviewLoadId = useRef(0);
+  const photoPreviewCloseButton = useRef<HTMLButtonElement | null>(null);
   const [isShiftPressed, setIsShiftPressed] = useState(false);
   const [hoveredPhotoId, setHoveredPhotoId] = useState<number | null>(null);
   const [collapsedHierarchyNodes, setCollapsedHierarchyNodes] = useState<
@@ -361,6 +402,7 @@ function App() {
 
   useEffect(() => {
     if (selectedAlbumId === null) {
+      closePhotoPreview();
       setPhotos([]);
       setSelectedPhotoIds(new Set());
       selectionAnchorId.current = null;
@@ -369,11 +411,27 @@ function App() {
 
     setSelectedPhotoIds(new Set());
     selectionAnchorId.current = null;
+    closePhotoPreview();
     loadPhotos(selectedAlbumId).catch((error: unknown) => {
       console.error('Failed to load photos for the selected album.', error);
       setPhotos([]);
     });
   }, [selectedAlbumId]);
+
+  useEffect(() => {
+    if (
+      photoPreview &&
+      !photos.some((photo) => photo.id === photoPreview.photo.id)
+    ) {
+      closePhotoPreview();
+    }
+  }, [photos, photoPreview]);
+
+  useEffect(() => {
+    if (photoPreview) {
+      photoPreviewCloseButton.current?.focus();
+    }
+  }, [photoPreview?.photo.id]);
 
   const togglePhotoSelection = (photoId: number, updateAnchor = true) => {
     if (updateAnchor) {
@@ -416,6 +474,70 @@ function App() {
     });
   };
 
+  const openPhotoPreview = (photo: PhotoWithThumbnail) => {
+    const loadId = ++photoPreviewLoadId.current;
+    const isNavigating = photoPreview !== null;
+    if (!isNavigating) {
+      setPreviewDimensions(null);
+      setPhotoPreview({ photo, imageSrc: photo.thumbnail });
+    }
+    window.electronAPI.setPhotoPreviewActive(true);
+    if (photo.mime_type === 'image/heic') {
+      if (isNavigating) {
+        setPreviewDimensions(null);
+        setPhotoPreview({ photo, imageSrc: photo.thumbnail });
+      }
+      return;
+    }
+    window.electronAPI
+      .readPhoto(photo.storage_path)
+      .then(async (imageSrc) => {
+        const image = new Image();
+        image.src = imageSrc;
+        await image.decode();
+        if (photoPreviewLoadId.current === loadId) {
+          setPreviewDimensions(null);
+          setPhotoPreview({ photo, imageSrc });
+        }
+      })
+      .catch((error: unknown) => {
+        console.error(
+          `Failed to load original photo "${photo.filename}".`,
+          error,
+        );
+        if (photoPreviewLoadId.current === loadId) {
+          setPhotoPreview({ photo, imageSrc: photo.thumbnail });
+        }
+      });
+  };
+
+  const closePhotoPreview = () => {
+    if (!photoPreview || isPhotoPreviewClosing) {
+      return;
+    }
+    photoPreviewLoadId.current += 1;
+    setIsPhotoPreviewClosing(true);
+  };
+
+  const finishClosingPhotoPreview = () => {
+    setPhotoPreview(null);
+    setIsPhotoPreviewClosing(false);
+    window.electronAPI.setPhotoPreviewActive(false);
+  };
+
+  const navigatePhotoPreview = (offset: number) => {
+    if (!photoPreview) {
+      return;
+    }
+    const currentIndex = photos.findIndex(
+      (photo) => photo.id === photoPreview.photo.id,
+    );
+    const nextPhoto = photos[currentIndex + offset];
+    if (nextPhoto) {
+      openPhotoPreview(nextPhoto);
+    }
+  };
+
   const handlePhotoClick = (
     event: ReactMouseEvent<HTMLElement>,
     photoId: number,
@@ -424,6 +546,11 @@ function App() {
       selectPhotoRange(photoId);
     } else if (event.metaKey || event.ctrlKey || selectedPhotoIds.size > 0) {
       togglePhotoSelection(photoId);
+    } else {
+      const photo = photos.find((item) => item.id === photoId);
+      if (photo) {
+        openPhotoPreview(photo);
+      }
     }
   };
 
@@ -974,6 +1101,23 @@ function App() {
         event.preventDefault();
         selectionAnchorId.current = photos[0].id;
         setSelectedPhotoIds(new Set(photos.map((photo) => photo.id)));
+        if (photoPreview) {
+          closePhotoPreview();
+        }
+        return;
+      }
+
+      if (photoPreview) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closePhotoPreview();
+        } else if (event.key === 'ArrowRight') {
+          event.preventDefault();
+          navigatePhotoPreview(1);
+        } else if (event.key === 'ArrowLeft') {
+          event.preventDefault();
+          navigatePhotoPreview(-1);
+        }
         return;
       }
 
@@ -1013,6 +1157,7 @@ function App() {
     renamingAlbum,
     isCreateModalOpen,
     isDeleteAllConfirmOpen,
+    photoPreview,
   ]);
 
   useEffect(
@@ -1357,6 +1502,10 @@ function App() {
                       src={photo.thumbnail}
                       alt=""
                       draggable={false}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handlePhotoClick(event, photo.id);
+                      }}
                     />
                     <button
                       className="photo-selection-indicator"
@@ -2025,6 +2174,166 @@ function App() {
           </section>
         </div>
       )}
+
+      {photoPreview &&
+        createPortal(
+          <div
+            className={`photo-preview-overlay${isPhotoPreviewClosing ? ' is-closing' : ''}`}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Pratinjau ${photoPreview.photo.filename}`}
+            onAnimationEnd={(event) => {
+              if (
+                event.target === event.currentTarget &&
+                event.animationName === 'photo-preview-fade-out'
+              ) {
+                finishClosingPhotoPreview();
+              }
+            }}
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) {
+                closePhotoPreview();
+              }
+            }}
+          >
+            <div
+              className="photo-preview-stage"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) {
+                  closePhotoPreview();
+                }
+              }}
+            >
+              <button
+                className="photo-preview-close"
+                type="button"
+                aria-label="Kembali ke galeri"
+                onClick={closePhotoPreview}
+                ref={photoPreviewCloseButton}
+              >
+                ←
+              </button>
+              <button
+                className="photo-preview-nav photo-preview-nav--previous"
+                type="button"
+                aria-label="Foto sebelumnya"
+                disabled={
+                  photos.findIndex(
+                    (photo) => photo.id === photoPreview.photo.id,
+                  ) <= 0
+                }
+                onClick={() => navigatePhotoPreview(-1)}
+              >
+                ‹
+              </button>
+              <div
+                className="photo-preview-image-wrap"
+                key={photoPreview.photo.id}
+                onMouseDown={(event) => {
+                  if (event.target === event.currentTarget) {
+                    closePhotoPreview();
+                  }
+                }}
+              >
+                {photoPreview.imageSrc && (
+                  <img
+                    className="photo-preview-image"
+                    key={`${photoPreview.photo.id}-${
+                      photoPreview.imageSrc === photoPreview.photo.thumbnail
+                        ? 'thumbnail'
+                        : 'original'
+                    }`}
+                    src={photoPreview.imageSrc}
+                    alt={photoPreview.photo.filename}
+                    draggable={false}
+                    onLoad={(event) => {
+                      setPreviewDimensions({
+                        photoId: photoPreview.photo.id,
+                        width: event.currentTarget.naturalWidth,
+                        height: event.currentTarget.naturalHeight,
+                      });
+                    }}
+                  />
+                )}
+              </div>
+              <button
+                className="photo-preview-nav photo-preview-nav--next"
+                type="button"
+                aria-label="Foto berikutnya"
+                disabled={
+                  photos.findIndex(
+                    (photo) => photo.id === photoPreview.photo.id,
+                  ) >=
+                  photos.length - 1
+                }
+                onClick={() => navigatePhotoPreview(1)}
+              >
+                ›
+              </button>
+              <p className="photo-preview-counter">
+                {photos.findIndex(
+                  (photo) => photo.id === photoPreview.photo.id,
+                ) + 1}{' '}
+                / {photos.length}
+              </p>
+            </div>
+
+            <aside className="photo-preview-info">
+              <div className="photo-preview-info-heading">
+                <h2>Info</h2>
+              </div>
+              <section className="photo-preview-info-section">
+                <h3>Detail</h3>
+                <dl>
+                  <div>
+                    <dt>Nama file</dt>
+                    <dd title={photoPreview.photo.filename}>
+                      {photoPreview.photo.filename}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Diimpor</dt>
+                    <dd>{formatPhotoDate(photoPreview.photo.created_at)}</dd>
+                  </div>
+                  <div>
+                    <dt>Ukuran file</dt>
+                    <dd>{formatFileSize(photoPreview.photo.file_size)}</dd>
+                  </div>
+                  {photoPreview.imageSrc &&
+                    photoPreview.imageSrc !== photoPreview.photo.thumbnail &&
+                    previewDimensions?.photoId === photoPreview.photo.id && (
+                      <div>
+                        <dt>Dimensi</dt>
+                        <dd>
+                          {previewDimensions.width} × {previewDimensions.height}
+                        </dd>
+                      </div>
+                    )}
+                  <div>
+                    <dt>Format</dt>
+                    <dd>
+                      {photoPreview.photo.mime_type ?? 'Format tidak diketahui'}
+                    </dd>
+                  </div>
+                  {selectedAlbum && (
+                    <div>
+                      <dt>Album</dt>
+                      <dd>
+                        {selectedAlbum.hierarchy
+                          .map((level) => level.value)
+                          .join(' / ')}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+              </section>
+              <p className="photo-preview-hint">
+                Gunakan tombol panah untuk berpindah foto
+              </p>
+            </aside>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

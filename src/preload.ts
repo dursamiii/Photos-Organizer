@@ -3,6 +3,9 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('electronAPI', {
   isMacOS: process.platform === 'darwin',
 
+  setPhotoPreviewActive: (active: boolean) =>
+    ipcRenderer.send('set-photo-preview-active', active),
+
   selectPhotos: () => ipcRenderer.invoke('select-photos'),
 
   selectPhotoFolder: () => ipcRenderer.invoke('select-photo-folder'),

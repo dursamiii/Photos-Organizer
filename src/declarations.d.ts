@@ -58,6 +58,7 @@ interface ImportProgress {
 interface Window {
   electronAPI: {
     isMacOS: boolean;
+    setPhotoPreviewActive: (active: boolean) => void;
     selectPhotos: () => Promise<string[]>;
     selectPhotoFolder: () => Promise<string[]>;
     readPhoto: (filePath: string) => Promise<string>;
