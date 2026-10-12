@@ -3,6 +3,7 @@ import sys
 import os
 from concurrent.futures import ThreadPoolExecutor
 from thumbnail import generate_thumbnail
+from exiftool import extract_metadata
 
 
 # WORKER_COUNT = max(1, (os.cpu_count() or 1) - 1)
@@ -32,6 +33,12 @@ def process_command(command):
         return {
             "success": True,
             **result,
+        }
+
+    if action == "extract_metadata":
+        return {
+            "success": True,
+            "metadata": extract_metadata(command["input"]),
         }
 
     return {

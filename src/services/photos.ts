@@ -208,36 +208,9 @@ export function registerPhotoHandlers(): void {
 
           try {
             await copyFile(filePath, destination);
-
-            const thumbnailStartedAt = performance.now();
-            let thumbnailSucceeded = false;
-            console.info(`[Thumbnail] Started: ${fileName}`);
-
-            try {
-              const thumbnailResult = await engine.send({
-                id: randomUUID(),
-                action: 'generate_thumbnail',
-                input: destination,
-                output: thumbnailPath,
-                max_size: 500,
-              });
-
-              if (!thumbnailResult.success) {
-                throw new Error(
-                  `Thumbnail generation failed for ${fileName}: ${String(thumbnailResult.error ?? 'unknown engine error')}`,
-                );
-              }
-
-              thumbnailSucceeded = true;
-            } finally {
-              console.info(
-                `[Thumbnail] ${thumbnailSucceeded ? 'Finished' : 'Failed'}: ${fileName} in ${Math.round(performance.now() - thumbnailStartedAt)} ms`,
-              );
-            }
-
             const fileInfo = await stat(destination);
 
-            db.prepare(`
+            const photoInsert = db.prepare(`
               INSERT INTO photos (
                 filename,
                 original_path,
@@ -250,7 +223,8 @@ export function registerPhotoHandlers(): void {
                 created_at
               )
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(
+            `);
+            const photoResult = photoInsert.run(
               fileName,
               filePath,
               destination,
@@ -261,9 +235,63 @@ export function registerPhotoHandlers(): void {
               getMimeType(fileName),
               new Date().toISOString(),
             );
-
+            const photoId = Number(photoResult.lastInsertRowid);
             importedPhotos.push(destination);
+
+            const thumbnailStartedAt = performance.now();
+            const metadataStartedAt = performance.now();
+            const thumbnailPromise = engine.send({
+              id: randomUUID(),
+              action: 'generate_thumbnail',
+              input: destination,
+              output: thumbnailPath,
+              max_size: 500,
+            });
+            const metadataPromise = engine.send({
+              id: randomUUID(),
+              action: 'extract_metadata',
+              input: destination,
+            });
+            console.info(`[Thumbnail] Started: ${fileName}`);
+            console.info(`[Metadata] Started: ${fileName}`);
+
+            const [thumbnailOutcome, metadataOutcome] =
+              await Promise.allSettled([thumbnailPromise, metadataPromise]);
+            if (thumbnailOutcome.status === 'rejected') {
+              throw thumbnailOutcome.reason;
+            }
+            if (metadataOutcome.status === 'rejected') {
+              throw metadataOutcome.reason;
+            }
+            const thumbnailResult = thumbnailOutcome.value;
+            const metadataResult = metadataOutcome.value;
+            if (!thumbnailResult.success) {
+              throw new Error(
+                `Thumbnail generation failed for ${fileName}: ${String(thumbnailResult.error ?? 'unknown engine error')}`,
+              );
+            }
+            if (!metadataResult.success) {
+              throw new Error(
+                `Metadata extraction failed for ${fileName}: ${String(metadataResult.error ?? 'unknown engine error')}`,
+              );
+            }
+            db.prepare(`
+              INSERT INTO photo_metadata (photo_id, metadata)
+              VALUES (?, ?)
+            `).run(photoId, JSON.stringify(metadataResult.metadata));
+            console.info(
+              `[Thumbnail] Finished: ${fileName} in ${Math.round(performance.now() - thumbnailStartedAt)} ms`,
+            );
+            console.info(
+              `[Metadata] Finished: ${fileName} in ${Math.round(performance.now() - metadataStartedAt)} ms`,
+            );
           } catch (error) {
+            db.prepare(
+              'DELETE FROM photo_metadata WHERE photo_id IN (SELECT id FROM photos WHERE storage_path = ?)',
+            ).run(destination);
+            db.prepare('DELETE FROM photos WHERE storage_path = ?').run(
+              destination,
+            );
             await Promise.all([
               rm(destination, { force: true }),
               rm(thumbnailPath, { force: true }),
@@ -343,6 +371,7 @@ export function registerPhotoHandlers(): void {
       photo.thumbnail_path ? unlink(photo.thumbnail_path) : Promise.resolve(),
     ]);
 
+    db.prepare('DELETE FROM photo_metadata WHERE photo_id = ?').run(photoId);
     db.prepare(`
       DELETE FROM photos
       WHERE id = ?
@@ -390,6 +419,7 @@ export function registerPhotoHandlers(): void {
       managedPaths.map((filePath) => rm(filePath, { force: true })),
     );
 
+    db.prepare('DELETE FROM photo_metadata').run();
     const deleteResult = db.prepare('DELETE FROM photos').run();
     return deleteResult.changes;
   });

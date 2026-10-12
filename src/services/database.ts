@@ -235,6 +235,13 @@ if (albumIndexes.some((index) => index.origin === 'u')) {
   rebuildAlbums();
 }
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS photo_metadata (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    photo_id INTEGER NOT NULL UNIQUE,
+    metadata TEXT NOT NULL
+  );
+`);
 db.exec('CREATE INDEX IF NOT EXISTS idx_photos_album_id ON photos(album_id)');
 if (
   db

@@ -1,1 +1,2 @@
 pyvips>=3.2,<4
+PyExifTool>=0.5.6,<1
